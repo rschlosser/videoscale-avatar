@@ -1,0 +1,31 @@
+# RunPod Serverless variant — uses handler entry point instead of HTTP server
+# Build: docker build --platform linux/amd64 -f Dockerfile.runpod -t videoscale-avatar:runpod .
+
+FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3-pip python3.10-venv \
+    ffmpeg git wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+RUN git clone --depth 1 https://github.com/warmshao/FasterLivePortrait.git /app/FasterLivePortrait \
+    && cd /app/FasterLivePortrait && pip install --no-cache-dir -e .
+
+COPY download_models.py .
+RUN python download_models.py
+
+COPY app/ app/
+COPY runpod_handler.py .
+
+# RunPod handler — no HTTP server needed
+CMD ["python", "-u", "runpod_handler.py"]

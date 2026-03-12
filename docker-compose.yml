@@ -1,0 +1,19 @@
+# Local dev — requires NVIDIA GPU + nvidia-docker
+version: "3.8"
+
+services:
+  avatar:
+    build: .
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./checkpoints:/app/checkpoints  # Mount local checkpoints for dev
+    environment:
+      - CHECKPOINT_DIR=/app/checkpoints
