@@ -8,12 +8,23 @@ USER root
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
+# Fix NVIDIA stub libraries that shadow real driver libs at runtime.
+# The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
+# CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into
+# the same directory but the empty .so.1 / .515.x stubs take precedence.
+# This entrypoint script fixes the symlinks before starting the app.
+COPY fix_nvidia_stubs.sh /app/fix_nvidia_stubs.sh
+RUN chmod +x /app/fix_nvidia_stubs.sh
+
 # FasterLivePortrait repo (source code + configs)
 RUN git clone --depth 1 https://github.com/warmshao/FasterLivePortrait.git /app/FasterLivePortrait
 
 # Install FasterLivePortrait deps + our deps
 WORKDIR /app/FasterLivePortrait
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Downgrade transformers to avoid weights_only enforcement requiring torch>=2.6
+RUN pip install --no-cache-dir transformers==4.37.0
 
 WORKDIR /app
 COPY requirements.txt .
@@ -26,11 +37,19 @@ RUN python download_models.py
 # Symlink checkpoints so FasterLivePortrait finds them
 RUN ln -sf /app/checkpoints /app/FasterLivePortrait/checkpoints
 
+# Patch JoyVASA: weights_only=False for torch.load compatibility
+RUN sed -i 's/torch.load(motion_model_path, map_location="cpu")/torch.load(motion_model_path, map_location="cpu", weights_only=False)/' \
+    /app/FasterLivePortrait/src/pipelines/joyvasa_audio_to_motion_pipeline.py
+
+# Patch HuBERT: use eager attention to avoid sdpa output_attentions error
+RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_pretrained(audio_encoder_path, attn_implementation="eager")/' \
+    /app/FasterLivePortrait/src/models/JoyVASA/dit_talking_head.py
+
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
 
 COPY app/ app/
 COPY runpod_handler.py .
 
-# RunPod handler — no HTTP server needed
-CMD ["python", "-u", "runpod_handler.py"]
+# Fix NVIDIA stubs at container start, then launch handler
+CMD ["/bin/bash", "-c", "/app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
