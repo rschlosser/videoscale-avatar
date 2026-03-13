@@ -1,30 +1,40 @@
 """
 Avatar generation engine — wraps FasterLivePortrait + JoyVASA.
 
-Handles model loading and inference for audio-driven portrait animation.
+Uses the in-process Python API (not CLI) for audio-driven portrait animation.
+Two-stage pipeline:
+  1. JoyVASA: audio → facial motion coefficients (diffusion transformer)
+  2. LivePortrait: motion coefficients + source image → video frames
 """
 
-import asyncio
 import logging
 import os
-import subprocess
+import tempfile
 from pathlib import Path
+
+import cv2
+import numpy as np
+from omegaconf import OmegaConf
 
 logger = logging.getLogger(__name__)
 
-# Model checkpoint paths (downloaded at build time or first run)
 CHECKPOINT_DIR = Path(os.getenv("CHECKPOINT_DIR", "/app/checkpoints"))
+FLPROOT = Path(os.getenv("FLPROOT", "/app/FasterLivePortrait"))
+CONFIG_PATH = FLPROOT / "configs" / "onnx_infer.yaml"
 
 
 class AvatarEngine:
     """Audio-driven talking-head video generator.
 
-    Uses LivePortrait for portrait animation and JoyVASA for
+    Uses FasterLivePortrait for portrait animation and JoyVASA for
     audio → facial motion coefficient extraction.
     """
 
     def __init__(self):
         self.models_loaded = False
+        self.lp_pipeline = None
+        self.joyvasa_pipeline = None
+        self.infer_cfg = None
 
     def load_models(self):
         """Load all model weights into GPU memory.
@@ -32,34 +42,49 @@ class AvatarEngine:
         Called once at startup. Subsequent generate() calls reuse loaded models.
         """
         # Verify checkpoints exist
-        if not CHECKPOINT_DIR.exists():
-            raise RuntimeError(
-                f"Checkpoint directory not found: {CHECKPOINT_DIR}. "
-                "Run download_models.py or set CHECKPOINT_DIR."
-            )
-
-        required = ["liveportrait", "JoyVASA"]
-        for name in required:
-            path = CHECKPOINT_DIR / name
+        required = {
+            "liveportrait_onnx": CHECKPOINT_DIR / "liveportrait_onnx",
+            "JoyVASA": CHECKPOINT_DIR / "JoyVASA",
+            "chinese-hubert-base": CHECKPOINT_DIR / "chinese-hubert-base",
+        }
+        for name, path in required.items():
             if not path.exists():
                 raise RuntimeError(f"Missing checkpoint: {path}")
 
-        # TODO: Import and initialize FasterLivePortrait + JoyVASA models
-        # This will be filled in once we test the Docker image with actual models.
-        #
-        # Pseudocode for the actual implementation:
-        #
-        #   from faster_liveportrait import LivePortraitPipeline
-        #   self.pipeline = LivePortraitPipeline(
-        #       checkpoint_dir=str(CHECKPOINT_DIR / "liveportrait"),
-        #       joyvasa_dir=str(CHECKPOINT_DIR / "JoyVASA"),
-        #       device="cuda",
-        #   )
-        #
-        # For now, we verify the inference CLI works.
-        logger.info("Checkpoints verified: %s", [str(p.name) for p in CHECKPOINT_DIR.iterdir()])
+        # Load FasterLivePortrait config
+        self.infer_cfg = OmegaConf.load(str(CONFIG_PATH))
+        self.infer_cfg.infer_params.flag_pasteback = True
+
+        # Override checkpoint paths to use our download location
+        joyvasa_cfg = self.infer_cfg.joyvasa_models
+        joyvasa_cfg.motion_model_path = str(
+            CHECKPOINT_DIR / "JoyVASA" / "motion_generator" / "motion_generator_hubert_chinese.pt"
+        )
+        joyvasa_cfg.audio_model_path = str(CHECKPOINT_DIR / "chinese-hubert-base")
+        joyvasa_cfg.motion_template_path = str(
+            CHECKPOINT_DIR / "JoyVASA" / "motion_template" / "motion_template.pkl"
+        )
+
+        # Initialize JoyVASA audio-to-motion pipeline
+        from src.pipelines.joyvasa_audio_to_motion_pipeline import JoyVASAAudio2MotionPipeline
+
+        self.joyvasa_pipeline = JoyVASAAudio2MotionPipeline(
+            motion_model_path=joyvasa_cfg.motion_model_path,
+            audio_model_path=joyvasa_cfg.audio_model_path,
+            motion_template_path=joyvasa_cfg.motion_template_path,
+            cfg_mode=self.infer_cfg.infer_params.get("cfg_mode", "incremental"),
+            cfg_scale=self.infer_cfg.infer_params.get("cfg_scale", 4.0),
+        )
+        logger.info("JoyVASA pipeline loaded")
+
+        # Initialize LivePortrait pipeline
+        from src.pipelines.faster_live_portrait_pipeline import FasterLivePortraitPipeline
+
+        self.lp_pipeline = FasterLivePortraitPipeline(cfg=self.infer_cfg, is_animal=False)
+        logger.info("LivePortrait pipeline loaded")
+
         self.models_loaded = True
-        logger.info("Models loaded successfully")
+        logger.info("All models loaded successfully")
 
     async def generate(
         self,
@@ -82,48 +107,101 @@ class AvatarEngine:
         if not self.models_loaded:
             raise RuntimeError("Models not loaded — call load_models() first")
 
-        # Resolution mapping
+        import asyncio
+
+        return await asyncio.to_thread(
+            self._generate_sync, image_path, audio_path, output_path, resolution
+        )
+
+    def _generate_sync(
+        self,
+        image_path: str,
+        audio_path: str,
+        output_path: str,
+        resolution: str,
+    ) -> str:
+        """Synchronous generation — runs in a thread."""
         res_map = {
-            "480p": (480, 854),   # 9:16 portrait
+            "480p": (480, 854),
             "720p": (720, 1280),
         }
-        height, width = res_map.get(resolution, (480, 854))
+        target_h, target_w = res_map.get(resolution, (480, 854))
 
         logger.info(
             "Generating: image=%s, audio=%s, resolution=%s (%dx%d)",
-            image_path, audio_path, resolution, width, height,
+            image_path, audio_path, resolution, target_w, target_h,
         )
 
-        # Run inference via CLI (FasterLivePortrait with JoyVASA audio mode)
-        # This approach works with the existing Docker image and avoids
-        # complex Python import chains. We'll optimize to in-process later.
+        # Step 1: Audio → motion sequence via JoyVASA
+        logger.info("Step 1/3: Extracting motion from audio...")
+        tgt_motion = self.joyvasa_pipeline.gen_motion_sequence(audio_path)
+        n_frames = tgt_motion["n_frames"]
+        fps = tgt_motion["output_fps"]
+        logger.info("Motion extracted: %d frames at %d fps", n_frames, fps)
+
+        # Step 2: Prepare source image
+        logger.info("Step 2/3: Preparing source image...")
+        ret = self.lp_pipeline.prepare_source(image_path, realtime=False)
+        if not ret:
+            raise RuntimeError(f"Failed to detect face in source image: {image_path}")
+
+        # Step 3: Render each frame
+        logger.info("Step 3/3: Rendering %d frames...", n_frames)
+        frames = []
+        for i in range(n_frames):
+            motion_info = [
+                tgt_motion["motion"][i],
+                tgt_motion["c_eyes_lst"][i] if tgt_motion["c_eyes_lst"] else None,
+                tgt_motion["c_lip_lst"][i] if tgt_motion["c_lip_lst"] else None,
+            ]
+            out_crop, out_org = self.lp_pipeline.run_with_pkl(
+                motion_info,
+                self.lp_pipeline.src_imgs[0],
+                self.lp_pipeline.src_infos[0],
+                first_frame=(i == 0),
+            )
+            # out_org is RGB, convert to BGR for OpenCV
+            frame_bgr = cv2.cvtColor(out_org, cv2.COLOR_RGB2BGR)
+
+            # Resize to target resolution if needed
+            h, w = frame_bgr.shape[:2]
+            if h != target_h or w != target_w:
+                frame_bgr = cv2.resize(frame_bgr, (target_w, target_h))
+
+            frames.append(frame_bgr)
+
+            if (i + 1) % 50 == 0:
+                logger.info("Rendered %d/%d frames", i + 1, n_frames)
+
+        # Write video
+        logger.info("Writing video: %s", output_path)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(output_path, fourcc, fps, (target_w, target_h))
+        for frame in frames:
+            writer.write(frame)
+        writer.release()
+
+        # Remux with ffmpeg for proper H.264 encoding + audio
+        final_path = output_path
+        tmp_raw = output_path + ".raw.mp4"
+        os.rename(output_path, tmp_raw)
+
+        import subprocess
         cmd = [
-            "python", "-m", "faster_liveportrait.inference",
-            "-r", image_path,
-            "-a", audio_path,
-            "-o", output_path,
-            "--animation_mode", "human",
-            "--cfg_scale", "2.0",
+            "ffmpeg", "-y",
+            "-i", tmp_raw,
+            "-i", audio_path,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-shortest",
+            "-movflags", "+faststart",
+            final_path,
         ]
-
-        logger.info("Running: %s", " ".join(cmd))
-
-        # Run in thread pool to not block the event loop
-        result = await asyncio.to_thread(
-            subprocess.run,
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=300,  # 5 min max
-            cwd="/app",
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        os.unlink(tmp_raw)
 
         if result.returncode != 0:
-            logger.error("Inference failed:\nstdout: %s\nstderr: %s", result.stdout, result.stderr)
-            raise RuntimeError(f"Inference failed (exit {result.returncode}): {result.stderr[-500:]}")
+            raise RuntimeError(f"ffmpeg failed: {result.stderr[-500:]}")
 
-        if not Path(output_path).exists():
-            raise RuntimeError("Inference produced no output file")
-
-        logger.info("Inference complete: %s", output_path)
-        return output_path
+        logger.info("Generation complete: %s (%d frames)", final_path, n_frames)
+        return final_path

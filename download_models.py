@@ -2,19 +2,18 @@
 """Download model checkpoints from HuggingFace.
 
 Run this during Docker build or on first startup.
-Downloads LivePortrait + JoyVASA + HuBERT checkpoints.
+Downloads FasterLivePortrait ONNX models + JoyVASA + HuBERT checkpoints.
 """
 
-import subprocess
-import sys
+from huggingface_hub import snapshot_download
 
 CHECKPOINT_DIR = "/app/checkpoints"
 
 MODELS = [
-    # LivePortrait base models
+    # FasterLivePortrait ONNX models (NOT the raw KwaiVGI/LivePortrait PyTorch weights)
     {
-        "repo": "KwaiVGI/LivePortrait",
-        "local_dir": f"{CHECKPOINT_DIR}/liveportrait",
+        "repo": "warmshao/FasterLivePortrait",
+        "local_dir": f"{CHECKPOINT_DIR}",
     },
     # JoyVASA audio-driven motion model
     {
@@ -32,22 +31,11 @@ MODELS = [
 def download():
     for model in MODELS:
         print(f"\n--- Downloading {model['repo']} ---")
-        cmd = [
-            sys.executable, "-m", "huggingface_hub", "download",
-            model["repo"],
-            "--local-dir", model["local_dir"],
-            "--local-dir-use-symlinks", "False",
-        ]
-        # Use huggingface-cli if available
-        cli_cmd = [
-            "huggingface-cli", "download",
-            model["repo"],
-            "--local-dir", model["local_dir"],
-        ]
-        try:
-            subprocess.run(cli_cmd, check=True)
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            subprocess.run(cmd, check=True)
+        snapshot_download(
+            repo_id=model["repo"],
+            local_dir=model["local_dir"],
+        )
+        print(f"    Done: {model['local_dir']}")
 
     print(f"\n✅ All models downloaded to {CHECKPOINT_DIR}")
 
