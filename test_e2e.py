@@ -128,7 +128,7 @@ def test_gpu():
 
     if torch.cuda.is_available():
         dev = torch.cuda.get_device_name(0)
-        mem = torch.cuda.get_device_properties(0).total_mem / 1e9
+        mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         logger.info("  ✓ CUDA available: %s (%.1f GB)", dev, mem)
         return True
     else:
