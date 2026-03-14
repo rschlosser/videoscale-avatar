@@ -19,6 +19,17 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
+# Fix SSL: point aiohttp/requests to certifi's up-to-date CA bundle
+# The base image may ship stale system certs that break HTTPS webhooks
+try:
+    import certifi
+    ca_bundle = certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", ca_bundle)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca_bundle)
+    print(f"SSL_CERT_FILE set to {ca_bundle}", flush=True)
+except ImportError:
+    print("certifi not installed, using system CA certs", flush=True)
+
 import runpod
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)

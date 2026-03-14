@@ -6,6 +6,9 @@ python-multipart>=0.0.6
 # RunPod serverless SDK
 runpod>=1.6.0
 
+# SSL certificates for aiohttp (RunPod SDK uses aiohttp for webhook delivery)
+certifi
+
 # Config (needed to load FasterLivePortrait configs)
 omegaconf>=2.3.0
 
