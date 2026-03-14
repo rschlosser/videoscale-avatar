@@ -133,15 +133,16 @@ class AvatarEngine:
         )
 
         # Step 1: Audio → motion sequence via JoyVASA
+        import time as _time
         logger.info("Step 1/3: Extracting motion from audio...")
+        _t1 = _time.time()
         tgt_motion = self.joyvasa_pipeline.gen_motion_sequence(audio_path)
         n_frames = tgt_motion["n_frames"]
         fps = tgt_motion["output_fps"]
-        logger.info("Motion extracted: %d frames at %d fps", n_frames, fps)
+        logger.info("Motion extracted: %d frames at %d fps (%.1fs)", n_frames, fps, _time.time() - _t1)
 
         # Step 2: Prepare source image
         logger.info("Step 2/3: Preparing source image...")
-        import time as _time
         _t2 = _time.time()
         ret = self.lp_pipeline.prepare_source(image_path, realtime=False)
         logger.info(
