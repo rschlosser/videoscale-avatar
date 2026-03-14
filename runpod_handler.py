@@ -19,23 +19,43 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
-# Fix SSL: patch aiohttp to disable SSL verification before importing runpod.
+# Fix SSL: patch RunPod SDK's AsyncClientSession to disable SSL verification.
 # The base image ships stale system CA certs. RunPod SDK uses aiohttp to POST
-# job results via HTTPS webhooks. Without this patch, result delivery fails
-# silently and jobs appear to hang forever.
-import aiohttp
-
-_OriginalTCPConnector = aiohttp.TCPConnector
-
-class _PatchedTCPConnector(_OriginalTCPConnector):
-    def __init__(self, *args, **kwargs):
-        kwargs.setdefault("ssl", False)
-        super().__init__(*args, **kwargs)
-
-aiohttp.TCPConnector = _PatchedTCPConnector
-print("SSL: patched aiohttp.TCPConnector with ssl=False", flush=True)
-
+# job results via HTTPS webhooks. Without this, result delivery silently fails.
+#
+# The SDK imports TCPConnector at module scope (from aiohttp import TCPConnector),
+# so patching aiohttp.TCPConnector doesn't work. Instead, we patch the SDK's
+# AsyncClientSession factory after import.
 import runpod
+import runpod.http_client as _rp_http
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
+
+_orig_get_auth_header = _rp_http.get_auth_header
+
+def _patched_async_session(*args, **kwargs):
+    return ClientSession(
+        connector=TCPConnector(limit=0, ssl=False),
+        headers=_orig_get_auth_header(),
+        timeout=ClientTimeout(600, ceil_threshold=400),
+        *args,
+        **kwargs,
+    )
+
+_rp_http.AsyncClientSession = _patched_async_session
+# Patch all modules that import AsyncClientSession
+for mod_path in [
+    "runpod.serverless.modules.rp_scale",
+    "runpod.serverless.modules.rp_progress",
+    "runpod.serverless.modules.rp_http",
+]:
+    try:
+        mod = __import__(mod_path, fromlist=["AsyncClientSession"])
+        if hasattr(mod, "AsyncClientSession"):
+            mod.AsyncClientSession = _patched_async_session
+    except (ImportError, AttributeError):
+        pass
+
+print("SSL: patched RunPod AsyncClientSession with ssl=False", flush=True)
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
