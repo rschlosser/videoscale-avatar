@@ -19,23 +19,6 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
-# Log SSL cert paths for debugging
-import ssl
-_paths = ssl.get_default_verify_paths()
-print(f"SSL default verify paths: cafile={_paths.cafile}, capath={_paths.capath}, "
-      f"openssl_cafile={_paths.openssl_cafile}", flush=True)
-
-# Ensure certifi certs are used even if Dockerfile copy missed the right path
-try:
-    import certifi
-    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
-    # Also set for OpenSSL
-    os.environ.setdefault("CURL_CA_BUNDLE", certifi.where())
-    print(f"SSL_CERT_FILE={certifi.where()}", flush=True)
-except ImportError:
-    pass
-
 import runpod
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)

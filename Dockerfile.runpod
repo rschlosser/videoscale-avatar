@@ -52,17 +52,14 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
 
-# Update CA certificates — base image ships stale certs that break HTTPS.
-# RunPod SDK uses aiohttp → OpenSSL for webhook delivery.
-# Conda's Python uses its own OpenSSL with certs at a different path than system.
-# Copy certifi's CA bundle to ALL known cert locations.
-RUN CERTIFI_PATH=$(python -c "import certifi; print(certifi.where())") && \
-    cp "$CERTIFI_PATH" /etc/ssl/certs/ca-certificates.crt && \
-    OPENSSL_DIR=$(python -c "import ssl; print(ssl.get_default_verify_paths().openssl_cafile)") && \
-    cp "$CERTIFI_PATH" "$OPENSSL_DIR" 2>/dev/null || true && \
-    OPENSSL_PATH=$(python -c "import ssl; print(ssl.get_default_verify_paths().cafile or '')") && \
-    [ -n "$OPENSSL_PATH" ] && cp "$CERTIFI_PATH" "$OPENSSL_PATH" 2>/dev/null || true && \
-    echo "CA certs updated: system + OpenSSL paths"
+# Fix SSL for RunPod SDK's aiohttp result delivery.
+# The base image's conda OpenSSL has stale CA certs. Rather than guessing all cert
+# paths, we patch the SDK's http_client.py to create an ssl.SSLContext using certifi,
+# which aiohttp respects via the TCPConnector's ssl parameter.
+RUN SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    sed -i 's/TCPConnector(limit=0)/TCPConnector(limit=0, ssl=__import__("ssl").create_default_context(cafile=__import__("certifi").where()))/' \
+    "$SITE_PKGS/runpod/http_client.py" && \
+    echo "Patched RunPod http_client.py with certifi SSL context"
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
