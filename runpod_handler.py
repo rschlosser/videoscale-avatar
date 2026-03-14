@@ -1,51 +1,27 @@
 """
 RunPod Serverless Handler for avatar video generation.
+
+Minimal startup to ensure handler registers quickly with RunPod.
+Heavy imports (torch, cv2, etc.) are deferred to first job.
 """
 
-import base64
 import logging
 import os
 import sys
-import tempfile
 import time
-import traceback
-from pathlib import Path
 
-logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, force=True)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
 
-logger.info("Starting handler module...")
+print("=== Handler module starting ===", flush=True)
 t_module_start = time.time()
 
-# Log system info for debugging
-try:
-    import subprocess
-    gpu_info = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
-                              capture_output=True, text=True, timeout=10)
-    logger.info("GPU: %s", gpu_info.stdout.strip() if gpu_info.returncode == 0 else f"nvidia-smi failed: {gpu_info.stderr}")
-except Exception as e:
-    logger.info("GPU info unavailable: %s", e)
-
-try:
-    import torch
-    logger.info("PyTorch %s, CUDA available: %s, CUDA version: %s",
-                torch.__version__, torch.cuda.is_available(),
-                torch.version.cuda if torch.cuda.is_available() else "N/A")
-    if torch.cuda.is_available():
-        logger.info("GPU device: %s, memory: %.1f GB",
-                     torch.cuda.get_device_name(0),
-                     torch.cuda.get_device_properties(0).total_mem / 1e9)
-except Exception as e:
-    logger.info("PyTorch info unavailable: %s", e)
-
-logger.info("Disk usage: %s", subprocess.run(["df", "-h", "/"], capture_output=True, text=True).stdout.strip())
-logger.info("Python: %s", sys.version)
-logger.info("CWD: %s", os.getcwd())
-logger.info("PYTHONPATH: %s", os.environ.get("PYTHONPATH", "not set"))
+print(f"Python: {sys.version}", flush=True)
+print(f"CWD: {os.getcwd()}", flush=True)
 
 import runpod
 
-logger.info("runpod %s imported (%.1fs)", getattr(runpod, '__version__', '?'), time.time() - t_module_start)
+print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
 # Lazy model loading
 engine = None
@@ -66,7 +42,8 @@ def _ensure_models():
         engine.load_models()
         logger.info("Models loaded in %.1fs", time.time() - t0)
     except Exception as e:
-        load_error = f"{e}\n{traceback.format_exc()}"
+        import traceback as tb
+        load_error = f"{e}\n{tb.format_exc()}"
         logger.error("Model loading failed: %s", e, exc_info=True)
         raise
 
@@ -87,6 +64,9 @@ def handler(job):
 
     # Debug: test model loading
     if input_data.get("debug"):
+        import base64
+        import tempfile
+        from pathlib import Path
         results = {"uptime": round(time.time() - t_module_start, 1)}
         try:
             _ensure_models()
@@ -128,11 +108,16 @@ def handler(job):
                         "src_infos": len(pipeline.src_infos),
                     }
                 except Exception as e:
-                    results["prepare_source_error"] = f"{e}\n{traceback.format_exc()}"
+                    import traceback as tb
+                    results["prepare_source_error"] = f"{e}\n{tb.format_exc()}"
 
         return results
 
     # Normal: generate video
+    import base64
+    import tempfile
+    from pathlib import Path
+
     try:
         _ensure_models()
     except Exception as e:
@@ -179,9 +164,11 @@ def handler(job):
     }
 
 
-logger.info("Registering handler (%.1fs since module load)...", time.time() - t_module_start)
+print(f"Registering handler ({time.time() - t_module_start:.1f}s since module load)...", flush=True)
 try:
     runpod.serverless.start({"handler": handler})
 except Exception as e:
-    logger.critical("runpod.serverless.start() CRASHED: %s", e, exc_info=True)
+    print(f"CRITICAL: runpod.serverless.start() CRASHED: {e}", flush=True)
+    import traceback
+    traceback.print_exc()
     sys.exit(1)
