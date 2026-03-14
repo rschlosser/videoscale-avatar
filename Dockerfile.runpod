@@ -10,11 +10,6 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
-# Update CA certificates — base image ships stale certs that break HTTPS
-# (RunPod SDK posts results via HTTPS webhooks using aiohttp)
-RUN apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates && \
-    update-ca-certificates && rm -rf /var/lib/apt/lists/*
-
 # Fix NVIDIA stub libraries that shadow real driver libs at runtime.
 # The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
 # CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into
@@ -56,6 +51,13 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 # The base image has tensorrt Python package but may lack libnvinfer.so.8 at runtime
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
+
+# Update CA certificates — base image ships stale certs that break HTTPS
+# (RunPod SDK posts results via HTTPS webhooks using aiohttp)
+# IMPORTANT: placed late in Dockerfile to preserve Docker layer cache for all
+# expensive steps above (git clone, pip install, model downloads).
+RUN apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates && \
+    update-ca-certificates && rm -rf /var/lib/apt/lists/*
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
