@@ -53,10 +53,16 @@ RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportErr
     /app/FasterLivePortrait/src/models/predictor.py
 
 # Update CA certificates — base image ships stale certs that break HTTPS.
-# (RunPod SDK posts results via HTTPS webhooks using aiohttp which uses OpenSSL.)
-# Use certifi's CA bundle (installed via pip) as the system-wide CA certs.
-RUN python -c "import certifi; print(certifi.where())" | xargs -I{} cp {} /etc/ssl/certs/ca-certificates.crt && \
-    echo "System CA certs updated from certifi"
+# RunPod SDK uses aiohttp → OpenSSL for webhook delivery.
+# Conda's Python uses its own OpenSSL with certs at a different path than system.
+# Copy certifi's CA bundle to ALL known cert locations.
+RUN CERTIFI_PATH=$(python -c "import certifi; print(certifi.where())") && \
+    cp "$CERTIFI_PATH" /etc/ssl/certs/ca-certificates.crt && \
+    OPENSSL_DIR=$(python -c "import ssl; print(ssl.get_default_verify_paths().openssl_cafile)") && \
+    cp "$CERTIFI_PATH" "$OPENSSL_DIR" 2>/dev/null || true && \
+    OPENSSL_PATH=$(python -c "import ssl; print(ssl.get_default_verify_paths().cafile or '')") && \
+    [ -n "$OPENSSL_PATH" ] && cp "$CERTIFI_PATH" "$OPENSSL_PATH" 2>/dev/null || true && \
+    echo "CA certs updated: system + OpenSSL paths"
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
