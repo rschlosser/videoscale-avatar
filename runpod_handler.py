@@ -74,14 +74,17 @@ def handler(job):
             resolution,
         )
 
-        # Run synchronously (RunPod handler is sync)
-        import asyncio
-        asyncio.run(engine.generate(
-            image_path=str(img_path),
-            audio_path=str(audio_path),
-            output_path=str(output_path),
-            resolution=resolution,
-        ))
+        # Call sync method directly (avoid asyncio.run conflicts with RunPod's event loop)
+        try:
+            engine._generate_sync(
+                image_path=str(img_path),
+                audio_path=str(audio_path),
+                output_path=str(output_path),
+                resolution=resolution,
+            )
+        except Exception as e:
+            logger.error("Generation failed: %s", e, exc_info=True)
+            return {"error": str(e)}
 
         if not output_path.exists():
             return {"error": "Generation failed — no output produced"}
