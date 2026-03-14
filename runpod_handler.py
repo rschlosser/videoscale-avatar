@@ -5,7 +5,6 @@ RunPod Serverless Handler for avatar video generation.
 import base64
 import logging
 import os
-import ssl
 import sys
 import tempfile
 import time
@@ -18,40 +17,7 @@ logger = logging.getLogger(__name__)
 logger.info("Starting handler module...")
 t_module_start = time.time()
 
-# Fix: base image may have stale SSL certificates that prevent aiohttp
-# from posting results back to RunPod's webhook endpoint.
-# Use certifi's CA bundle if available, and patch the SDK session factory.
-try:
-    import certifi
-    os.environ.setdefault("SSL_CERT_FILE", certifi.where())
-    os.environ.setdefault("REQUESTS_CA_BUNDLE", certifi.where())
-    logger.info("Set SSL_CERT_FILE=%s", certifi.where())
-except ImportError:
-    logger.info("certifi not available")
-
 import runpod
-
-# Patch the AsyncClientSession factory to disable SSL verification
-# This ensures result delivery works even with stale system CA certs
-import runpod.http_client as _rp_http
-_orig_async_session = _rp_http.AsyncClientSession
-
-def _patched_async_session(*args, **kwargs):
-    import aiohttp
-    return aiohttp.ClientSession(
-        connector=aiohttp.TCPConnector(limit=0, ssl=False),
-        headers=_rp_http.get_auth_header(),
-        timeout=aiohttp.ClientTimeout(600, ceil_threshold=400),
-        *args, **kwargs,
-    )
-
-_rp_http.AsyncClientSession = _patched_async_session
-try:
-    import runpod.serverless.modules.rp_scale as _rp_scale
-    _rp_scale.AsyncClientSession = _patched_async_session
-except Exception:
-    pass
-logger.info("Patched AsyncClientSession to disable SSL verification")
 
 logger.info("runpod %s imported (%.1fs)", getattr(runpod, '__version__', '?'), time.time() - t_module_start)
 
