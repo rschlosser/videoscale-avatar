@@ -145,6 +145,16 @@ def handler(job):
     """
     input_data = job["input"]
 
+    # Ping mode: instant return to verify worker is alive
+    if input_data.get("ping"):
+        import sys
+        return {
+            "pong": True,
+            "models_loaded": engine.models_loaded,
+            "python": sys.version,
+            "model_keys": list(engine.lp_pipeline.model_dict.keys()) if engine.lp_pipeline else [],
+        }
+
     # Debug mode: run diagnostics
     if input_data.get("debug"):
         try:
