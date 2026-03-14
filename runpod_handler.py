@@ -20,19 +20,26 @@ t_module_start = time.time()
 
 # Fix: base image has stale SSL certificates that prevent aiohttp from
 # posting results back to RunPod's webhook endpoint. Monkey-patch
-# aiohttp.TCPConnector to use an unverified SSL context.
+# TCPConnector everywhere to disable SSL verification.
 import aiohttp
 _OrigTCPConnector = aiohttp.TCPConnector
 
-def _PatchedTCPConnector(*args, **kwargs):
-    if "ssl" not in kwargs:
-        kwargs["ssl"] = False
-    return _OrigTCPConnector(*args, **kwargs)
+class _NoSSLTCPConnector(_OrigTCPConnector):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("ssl", False)
+        super().__init__(*args, **kwargs)
 
-aiohttp.TCPConnector = _PatchedTCPConnector
-logger.info("Patched aiohttp.TCPConnector to disable SSL verification")
+# Patch aiohttp itself
+aiohttp.TCPConnector = _NoSSLTCPConnector
 
+# Import runpod (which imports http_client, binding TCPConnector)
 import runpod
+
+# Also patch the already-imported reference in runpod.http_client
+import runpod.http_client
+runpod.http_client.TCPConnector = _NoSSLTCPConnector
+
+logger.info("Patched aiohttp.TCPConnector to disable SSL verification")
 
 logger.info("runpod %s imported (%.1fs)", getattr(runpod, '__version__', '?'), time.time() - t_module_start)
 
