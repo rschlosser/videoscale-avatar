@@ -10,6 +10,11 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
+# Update SSL certificates — base image has stale certs that break HTTPS
+# (RunPod SDK sends results via HTTPS webhooks, fails silently with old certs)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    update-ca-certificates && rm -rf /var/lib/apt/lists/*
+
 # Fix NVIDIA stub libraries that shadow real driver libs at runtime.
 # The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
 # CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into
@@ -63,5 +68,6 @@ ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
 COPY app/ app/
 COPY runpod_handler.py .
 
-# Fix NVIDIA stubs at container start, then launch handler
+# Clear any ENTRYPOINT from base image, set our own CMD
+ENTRYPOINT []
 CMD ["/bin/bash", "-c", "/app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
