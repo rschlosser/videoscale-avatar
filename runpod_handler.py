@@ -5,6 +5,7 @@ RunPod Serverless Handler for avatar video generation.
 import base64
 import logging
 import os
+import ssl
 import sys
 import tempfile
 import time
@@ -16,6 +17,20 @@ logger = logging.getLogger(__name__)
 
 logger.info("Starting handler module...")
 t_module_start = time.time()
+
+# Fix: base image has stale SSL certificates that prevent aiohttp from
+# posting results back to RunPod's webhook endpoint. Monkey-patch
+# aiohttp.TCPConnector to use an unverified SSL context.
+import aiohttp
+_OrigTCPConnector = aiohttp.TCPConnector
+
+def _PatchedTCPConnector(*args, **kwargs):
+    if "ssl" not in kwargs:
+        kwargs["ssl"] = False
+    return _OrigTCPConnector(*args, **kwargs)
+
+aiohttp.TCPConnector = _PatchedTCPConnector
+logger.info("Patched aiohttp.TCPConnector to disable SSL verification")
 
 import runpod
 
