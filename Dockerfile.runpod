@@ -52,12 +52,11 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
 
-# Update CA certificates — base image ships stale certs that break HTTPS
-# (RunPod SDK posts results via HTTPS webhooks using aiohttp)
-# IMPORTANT: placed late in Dockerfile to preserve Docker layer cache for all
-# expensive steps above (git clone, pip install, model downloads).
-RUN apt-get update -qq && apt-get install -y --no-install-recommends ca-certificates && \
-    update-ca-certificates && rm -rf /var/lib/apt/lists/*
+# Update CA certificates — base image ships stale certs that break HTTPS.
+# (RunPod SDK posts results via HTTPS webhooks using aiohttp which uses OpenSSL.)
+# Use certifi's CA bundle (installed via pip) as the system-wide CA certs.
+RUN python -c "import certifi; print(certifi.where())" | xargs -I{} cp {} /etc/ssl/certs/ca-certificates.crt && \
+    echo "System CA certs updated from certifi"
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
