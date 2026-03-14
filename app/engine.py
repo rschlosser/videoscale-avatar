@@ -141,7 +141,15 @@ class AvatarEngine:
 
         # Step 2: Prepare source image
         logger.info("Step 2/3: Preparing source image...")
+        import time as _time
+        _t2 = _time.time()
         ret = self.lp_pipeline.prepare_source(image_path, realtime=False)
+        logger.info(
+            "prepare_source returned=%s in %.1fs, src_imgs=%d, src_infos=%d",
+            ret, _time.time() - _t2,
+            len(getattr(self.lp_pipeline, 'src_imgs', [])),
+            len(getattr(self.lp_pipeline, 'src_infos', [])),
+        )
         if not ret:
             raise RuntimeError(f"Failed to detect face in source image: {image_path}")
 
