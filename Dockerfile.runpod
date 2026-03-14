@@ -47,6 +47,11 @@ RUN sed -i 's/torch.load(motion_model_path, map_location="cpu")/torch.load(motio
 RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_pretrained(audio_encoder_path, attn_implementation="eager")/' \
     /app/FasterLivePortrait/src/models/JoyVASA/dit_talking_head.py
 
+# Patch predictor.py: catch ImportError (not just ModuleNotFoundError) for TensorRT
+# The base image has tensorrt Python package but may lack libnvinfer.so.8 at runtime
+RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
+    /app/FasterLivePortrait/src/models/predictor.py
+
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
 

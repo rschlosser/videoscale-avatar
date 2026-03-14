@@ -12,8 +12,18 @@
 
 LIB_DIR="/lib/x86_64-linux-gnu"
 
-# Detect the real driver version from the bind-mounted libcuda
-DRIVER_VER=$(ls "$LIB_DIR"/libcuda.so.*.*.* 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
+# Detect the real driver version from the bind-mounted libcuda.
+# Filter out empty stub files (0 bytes) that ship with the build-time CUDA toolkit.
+DRIVER_VER=""
+for f in "$LIB_DIR"/libcuda.so.*.*.*; do
+    [ -f "$f" ] || continue
+    [ -s "$f" ] || continue  # skip empty (0-byte) stubs
+    ver=$(echo "$f" | grep -oP '\d+\.\d+\.\d+')
+    if [ -n "$ver" ]; then
+        DRIVER_VER="$ver"
+        break
+    fi
+done
 
 if [ -z "$DRIVER_VER" ]; then
     echo "[fix_nvidia_stubs] No NVIDIA driver detected, skipping stub fix"

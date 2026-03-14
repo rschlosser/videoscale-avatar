@@ -23,8 +23,12 @@ logger = logging.getLogger(__name__)
 
 # Load models once at cold start
 engine = AvatarEngine()
-engine.load_models()
-logger.info("RunPod handler ready")
+try:
+    engine.load_models()
+    logger.info("RunPod handler ready")
+except Exception as e:
+    logger.error("Failed to load models: %s", e, exc_info=True)
+    raise
 
 
 def handler(job):
