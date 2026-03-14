@@ -11,11 +11,37 @@ import time
 import traceback
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
+logging.basicConfig(level=logging.DEBUG, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
 
 logger.info("Starting handler module...")
 t_module_start = time.time()
+
+# Log system info for debugging
+try:
+    import subprocess
+    gpu_info = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
+                              capture_output=True, text=True, timeout=10)
+    logger.info("GPU: %s", gpu_info.stdout.strip() if gpu_info.returncode == 0 else f"nvidia-smi failed: {gpu_info.stderr}")
+except Exception as e:
+    logger.info("GPU info unavailable: %s", e)
+
+try:
+    import torch
+    logger.info("PyTorch %s, CUDA available: %s, CUDA version: %s",
+                torch.__version__, torch.cuda.is_available(),
+                torch.version.cuda if torch.cuda.is_available() else "N/A")
+    if torch.cuda.is_available():
+        logger.info("GPU device: %s, memory: %.1f GB",
+                     torch.cuda.get_device_name(0),
+                     torch.cuda.get_device_properties(0).total_mem / 1e9)
+except Exception as e:
+    logger.info("PyTorch info unavailable: %s", e)
+
+logger.info("Disk usage: %s", subprocess.run(["df", "-h", "/"], capture_output=True, text=True).stdout.strip())
+logger.info("Python: %s", sys.version)
+logger.info("CWD: %s", os.getcwd())
+logger.info("PYTHONPATH: %s", os.environ.get("PYTHONPATH", "not set"))
 
 import runpod
 
@@ -154,4 +180,8 @@ def handler(job):
 
 
 logger.info("Registering handler (%.1fs since module load)...", time.time() - t_module_start)
-runpod.serverless.start({"handler": handler})
+try:
+    runpod.serverless.start({"handler": handler})
+except Exception as e:
+    logger.critical("runpod.serverless.start() CRASHED: %s", e, exc_info=True)
+    sys.exit(1)
