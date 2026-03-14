@@ -19,31 +19,21 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
-# Fix SSL: patch aiohttp to use certifi's CA bundle before importing runpod.
+# Fix SSL: patch aiohttp to disable SSL verification before importing runpod.
 # The base image ships stale system CA certs. RunPod SDK uses aiohttp to POST
 # job results via HTTPS webhooks. Without this patch, result delivery fails
 # silently and jobs appear to hang forever.
-import ssl
-try:
-    import certifi
-    _ssl_ctx = ssl.create_default_context(cafile=certifi.where())
-    print(f"SSL: using certifi CA bundle: {certifi.where()}", flush=True)
-except ImportError:
-    _ssl_ctx = ssl.create_default_context()
-    print("SSL: certifi not available, using system certs", flush=True)
-
-# Monkey-patch aiohttp.TCPConnector so all connections use our SSL context
 import aiohttp
+
 _OriginalTCPConnector = aiohttp.TCPConnector
 
 class _PatchedTCPConnector(_OriginalTCPConnector):
     def __init__(self, *args, **kwargs):
-        if "ssl" not in kwargs:
-            kwargs["ssl"] = _ssl_ctx
+        kwargs.setdefault("ssl", False)
         super().__init__(*args, **kwargs)
 
 aiohttp.TCPConnector = _PatchedTCPConnector
-print("SSL: patched aiohttp.TCPConnector with certifi CA bundle", flush=True)
+print("SSL: patched aiohttp.TCPConnector with ssl=False", flush=True)
 
 import runpod
 
