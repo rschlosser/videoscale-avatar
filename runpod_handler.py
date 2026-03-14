@@ -10,34 +10,58 @@ Deploy: build Docker image → push to registry → create RunPod endpoint.
 import base64
 import logging
 import os
+import sys
 import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import runpod
 
-from app.engine import AvatarEngine
-
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
 
-# Load models once at cold start
-engine = AvatarEngine()
-try:
-    engine.load_models()
-    logger.info("RunPod handler ready")
-except Exception as e:
-    logger.error("Failed to load models: %s", e, exc_info=True)
-    raise
+# Lazy model loading — don't block worker startup
+engine = None
+load_error = None
+
+
+def _ensure_models():
+    """Load models on first request (lazy init)."""
+    global engine, load_error
+    if engine is not None and engine.models_loaded:
+        return
+    if load_error is not None:
+        raise RuntimeError(f"Model loading failed previously: {load_error}")
+    try:
+        from app.engine import AvatarEngine
+        logger.info("Loading models (lazy init)...")
+        t0 = time.time()
+        engine = AvatarEngine()
+        engine.load_models()
+        logger.info("Models loaded in %.1fs", time.time() - t0)
+    except Exception as e:
+        load_error = str(e)
+        logger.error("Failed to load models: %s", e, exc_info=True)
+        raise
 
 
 def _debug_handler(input_data):
     """Run diagnostics on model pipeline — returns dict with results."""
-    import traceback
     import cv2
-    import numpy as np
 
-    results = {"models_loaded": engine.models_loaded}
+    results = {}
+
+    # Try loading models
+    try:
+        _ensure_models()
+        results["models_loaded"] = True
+    except Exception as e:
+        results["models_loaded"] = False
+        results["load_error"] = str(e)
+        results["load_traceback"] = traceback.format_exc()
+        return results
+
     pipeline = engine.lp_pipeline
 
     # List loaded models
@@ -52,10 +76,10 @@ def _debug_handler(input_data):
             img_path = os.path.join(td, "test.jpg")
             Path(img_path).write_bytes(base64.b64decode(image_b64))
 
-            # Test face detection
             img_bgr = cv2.imread(img_path)
             results["image_shape"] = list(img_bgr.shape) if img_bgr is not None else None
 
+            # Test face detection
             t0 = time.time()
             faces = pipeline.model_dict["face_analysis"].predict(img_bgr)
             results["face_detection_time"] = round(time.time() - t0, 2)
@@ -77,7 +101,6 @@ def _debug_handler(input_data):
                         vy_ratio=pipeline.cfg.crop_params.src_vy_ratio,
                     )
                     results["crop_image_time"] = round(time.time() - t0, 2)
-                    results["crop_image_keys"] = list(ret_dct.keys())
                     results["crop_img_shape"] = list(ret_dct["img_crop"].shape)
                 except Exception as e:
                     results["crop_image_error"] = f"{e}\n{traceback.format_exc()}"
@@ -94,7 +117,7 @@ def _debug_handler(input_data):
                 except Exception as e:
                     results["landmark_error"] = f"{e}\n{traceback.format_exc()}"
 
-            # Test motion_extractor with 256x256 crop
+            # Test motion_extractor
             if "crop_image_error" not in results and len(faces) > 0:
                 try:
                     img_crop_256 = cv2.resize(ret_dct["img_crop"], (256, 256))
@@ -116,7 +139,7 @@ def _debug_handler(input_data):
                 except Exception as e:
                     results["app_feat_extractor_error"] = f"{e}\n{traceback.format_exc()}"
 
-            # Now test full prepare_source
+            # Full prepare_source
             try:
                 t0 = time.time()
                 ret = pipeline.prepare_source(img_path, realtime=False)
@@ -131,28 +154,15 @@ def _debug_handler(input_data):
 
 
 def handler(job):
-    """RunPod serverless handler.
-
-    Input (job["input"]):
-        image_base64: str   — base64-encoded portrait image
-        audio_base64: str   — base64-encoded audio file
-        resolution: str     — "480p" or "720p" (default: "480p")
-        debug: bool         — if true, run diagnostics instead of generation
-
-    Output:
-        video_base64: str   — base64-encoded MP4
-        generation_time: float
-    """
+    """RunPod serverless handler."""
     input_data = job["input"]
 
-    # Ping mode: instant return to verify worker is alive
+    # Ping mode: instant return (no model loading)
     if input_data.get("ping"):
-        import sys
         return {
             "pong": True,
-            "models_loaded": engine.models_loaded,
+            "models_loaded": engine.models_loaded if engine else False,
             "python": sys.version,
-            "model_keys": list(engine.lp_pipeline.model_dict.keys()) if engine.lp_pipeline else [],
         }
 
     # Debug mode: run diagnostics
@@ -160,8 +170,13 @@ def handler(job):
         try:
             return _debug_handler(input_data)
         except Exception as e:
-            import traceback
             return {"debug_error": str(e), "traceback": traceback.format_exc()}
+
+    # Normal mode: generate video
+    try:
+        _ensure_models()
+    except Exception as e:
+        return {"error": f"Model loading failed: {e}"}
 
     image_b64 = input_data.get("image_base64")
     audio_b64 = input_data.get("audio_base64")
@@ -192,7 +207,6 @@ def handler(job):
             resolution,
         )
 
-        # Call sync method directly (avoid asyncio.run conflicts with RunPod's event loop)
         try:
             engine._generate_sync(
                 image_path=str(img_path),
