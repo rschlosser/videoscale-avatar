@@ -10,11 +10,6 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
-# Update SSL certificates — base image has stale certs that break HTTPS
-# (RunPod SDK sends results via HTTPS webhooks, fails silently with old certs)
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    update-ca-certificates && rm -rf /var/lib/apt/lists/*
-
 # Fix NVIDIA stub libraries that shadow real driver libs at runtime.
 # The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
 # CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into
@@ -57,17 +52,11 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
 
-# Patch prepare_source: re-raise exceptions instead of silently returning False
-# This lets the handler see the actual error message for debugging
-RUN sed -i 's/traceback.print_exc()/traceback.print_exc(); raise/' \
-    /app/FasterLivePortrait/src/pipelines/faster_live_portrait_pipeline.py
-
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
 
 COPY app/ app/
 COPY runpod_handler.py .
 
-# Clear any ENTRYPOINT from base image, set our own CMD
-ENTRYPOINT []
+# Fix NVIDIA stubs at container start, then launch handler
 CMD ["/bin/bash", "-c", "/app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
