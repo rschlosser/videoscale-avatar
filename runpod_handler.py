@@ -20,10 +20,11 @@ print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
 # --- Fix SSL for aiohttp ---
-# The base image (conda OpenSSL) has stale CA certs. SSL_CERT_FILE env var
-# alone doesn't fix aiohttp because ssl.create_default_context() on this
-# OpenSSL build doesn't respect it. We must patch ssl.create_default_context
-# to explicitly use certifi's CA bundle.
+# The base image (conda OpenSSL) has stale CA certs. aiohttp's TCPConnector
+# uses ssl.create_default_context() which loads the broken system certs.
+# Fix: monkey-patch RunPod's AsyncClientSession to pass a custom SSL context
+# with certifi's CA bundle to the TCPConnector. This is more targeted than
+# patching ssl.create_default_context globally (which caused crashes).
 import ssl
 
 try:
@@ -34,34 +35,19 @@ try:
     os.environ["REQUESTS_CA_BUNDLE"] = _certifi_ca
     os.environ["CURL_CA_BUNDLE"] = _certifi_ca
 
-    _orig_create_ctx = ssl.create_default_context
-
-    def _patched_create_ctx(
-        purpose=ssl.Purpose.SERVER_AUTH,
-        *,
-        cafile=None,
-        capath=None,
-        cadata=None,
-    ):
-        if cafile is None and capath is None and cadata is None:
-            cafile = _certifi_ca
-        return _orig_create_ctx(
-            purpose, cafile=cafile, capath=capath, cadata=cadata
-        )
-
-    ssl.create_default_context = _patched_create_ctx
-    print(
-        f"SSL: patched create_default_context + env vars → {_certifi_ca}",
-        flush=True,
-    )
+    # Create a proper SSL context with certifi certs
+    _ssl_ctx = ssl.create_default_context(cafile=_certifi_ca)
+    print(f"SSL: created context with certifi ({_certifi_ca})", flush=True)
 except ImportError:
+    _ssl_ctx = None
     print("WARNING: certifi not installed, using system certs", flush=True)
 except Exception as e:
-    print(f"WARNING: SSL patch failed: {e}", flush=True)
+    _ssl_ctx = None
+    print(f"WARNING: SSL context creation failed: {e}", flush=True)
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "0607ba0-v2"
+_COMMIT = "5cda602-v2"
 
 
 def _ntfy(msg):
@@ -85,6 +71,37 @@ print(
     f"({time.time() - t_module_start:.1f}s)",
     flush=True,
 )
+
+# --- Patch AsyncClientSession to use our SSL context ---
+if _ssl_ctx is not None:
+    try:
+        import runpod.http_client as _http_client
+        from aiohttp import ClientSession as _ClientSession
+        from aiohttp import ClientTimeout as _ClientTimeout
+        from aiohttp import TCPConnector as _TCPConnector
+
+        def _PatchedAsyncClientSession(*args, **kwargs):
+            return _ClientSession(
+                connector=_TCPConnector(limit=0, ssl=_ssl_ctx),
+                headers=_http_client.get_auth_header(),
+                timeout=_ClientTimeout(600, ceil_threshold=400),
+                *args,
+                **kwargs,
+            )
+
+        _http_client.AsyncClientSession = _PatchedAsyncClientSession
+
+        # Also patch the import in rp_scale which may have already imported it
+        try:
+            import runpod.serverless.modules.rp_scale as _rp_scale
+            if hasattr(_rp_scale, "AsyncClientSession"):
+                _rp_scale.AsyncClientSession = _PatchedAsyncClientSession
+        except Exception:
+            pass
+
+        print("SSL: patched AsyncClientSession with certifi SSL context", flush=True)
+    except Exception as e:
+        print(f"WARNING: AsyncClientSession patch failed: {e}", flush=True)
 
 # --- Print RunPod env vars ---
 env_lines = []
