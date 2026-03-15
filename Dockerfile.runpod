@@ -10,6 +10,10 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
+# Update conda CA certificates — base image has stale certs that break aiohttp SSL
+RUN conda update -y -n base ca-certificates 2>/dev/null || \
+    conda install -y -n base -c conda-forge ca-certificates || true
+
 # Fix NVIDIA stub libraries that shadow real driver libs at runtime.
 # The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
 # CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into

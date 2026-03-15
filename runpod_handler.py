@@ -47,7 +47,7 @@ except Exception as e:
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "0cfd79d-v4"
+_COMMIT = "7a0df7d-v5"
 
 
 def _ntfy(msg):
