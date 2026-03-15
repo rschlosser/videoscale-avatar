@@ -9,7 +9,6 @@ import logging
 import os
 import sys
 import time
-import urllib.request
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
@@ -20,27 +19,14 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
-# --- External diagnostic logging via ntfy.sh (stdlib only) ---
-NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-
-
-def _ntfy(msg):
-    """Fire-and-forget POST to ntfy.sh for external diagnostics. Uses only stdlib."""
-    try:
-        req = urllib.request.Request(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=str(msg)[:4000].encode("utf-8"),
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=5)
-    except Exception:
-        pass
-
-
-# --- FIX SSL FOR AIOHTTP ---
-# The base image (conda OpenSSL) has stale CA certs. Patch ssl.create_default_context
-# to always load our cert bundle so aiohttp's SSL context works.
+# --- FIX SSL FOR AIOHTTP (must be before any aiohttp imports) ---
+# The base image (conda OpenSSL) has stale/missing CA certs. aiohttp uses
+# ssl.create_default_context() which fails to verify HTTPS connections.
+# Fix: patch ssl.create_default_context to always use certifi's CA bundle.
+# This is the same approach requests/urllib3 uses internally.
 import ssl
+
+import certifi
 
 _orig_create_default_context = ssl.create_default_context
 
@@ -48,25 +34,34 @@ _orig_create_default_context = ssl.create_default_context
 def _patched_create_default_context(
     purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None
 ):
-    ctx = _orig_create_default_context(
+    if cafile is None:
+        cafile = certifi.where()
+    return _orig_create_default_context(
         purpose, cafile=cafile, capath=capath, cadata=cadata
     )
-    cert_file = os.environ.get(
-        "SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt"
-    )
-    try:
-        ctx.load_verify_locations(cert_file)
-    except Exception:
-        pass
-    return ctx
 
 
 ssl.create_default_context = _patched_create_default_context
-print(
-    f"Patched ssl.create_default_context to load "
-    f"{os.environ.get('SSL_CERT_FILE', '/etc/ssl/certs/ca-certificates.crt')}",
-    flush=True,
-)
+print(f"Patched ssl.create_default_context → certifi ({certifi.where()})", flush=True)
+
+# --- External diagnostic logging via ntfy.sh ---
+NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
+_COMMIT = "5779b49-fix2"  # manual tag for version tracking
+
+
+def _ntfy(msg):
+    """Fire-and-forget POST to ntfy.sh for external diagnostics."""
+    try:
+        import requests as _r
+
+        _r.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=str(msg)[:4000],
+            timeout=5,
+        )
+    except BaseException:
+        pass
+
 
 import runpod
 
@@ -76,7 +71,7 @@ print(
     flush=True,
 )
 
-# --- Print RunPod env vars + send to ntfy ---
+# --- Log RunPod env vars ---
 env_lines = []
 print("=== RunPod environment ===", flush=True)
 for key in sorted(os.environ):
@@ -88,19 +83,18 @@ for key in sorted(os.environ):
         print(f"  {key}={val}", flush=True)
 print("=== End RunPod env ===", flush=True)
 
-# Check JOB_DONE_URL
 try:
     import runpod.serverless.modules.rp_http as rp_http
 
     _job_done_url = getattr(rp_http, "JOB_DONE_URL", "NOT SET")
     print(f"JOB_DONE_URL: {_job_done_url}", flush=True)
-    _ntfy(
-        f"STARTUP: runpod={getattr(runpod, '__version__', '?')}, "
-        f"JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines)
-    )
 except Exception as e:
-    print(f"WARNING: Could not read JOB_DONE_URL: {e}", flush=True)
-    _ntfy(f"STARTUP: error reading JOB_DONE_URL: {e}")
+    _job_done_url = f"ERROR: {e}"
+
+_ntfy(
+    f"STARTUP [{_COMMIT}]: runpod={getattr(runpod, '__version__', '?')}, "
+    f"JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines[:10])
+)
 
 # Lazy model loading
 engine = None
@@ -135,17 +129,12 @@ def _real_handler(job):
 
     # Ping: instant return + diagnostics
     if input_data.get("ping"):
-        import runpod.serverless.modules.rp_http as _rp_http
-
         diag = {
             "pong": True,
             "models_loaded": engine.models_loaded if engine else False,
             "uptime": round(time.time() - t_module_start, 1),
             "runpod_version": getattr(runpod, "__version__", "?"),
-            "job_done_url": getattr(_rp_http, "JOB_DONE_URL", "NOT SET"),
-            "webhook_post_output": os.environ.get(
-                "RUNPOD_WEBHOOK_POST_OUTPUT", "NOT SET"
-            ),
+            "commit": _COMMIT,
         }
         return diag
 
@@ -264,17 +253,23 @@ def _real_handler(job):
 def handler(job):
     """Wrapper handler with ntfy diagnostics."""
     job_id = job.get("id", "unknown")
-    _ntfy(f"HANDLER CALLED: id={job_id}, keys={list(job.get('input', {}).keys())}")
+    _ntfy(f"HANDLER CALLED [{_COMMIT}]: id={job_id}, keys={list(job.get('input', {}).keys())}")
     try:
         t0 = time.time()
         result = _real_handler(job)
         elapsed = round(time.time() - t0, 2)
-        # Truncate result for ntfy (avoid sending huge base64)
-        result_summary = {k: type(v).__name__ for k, v in result.items()} if isinstance(result, dict) else str(type(result))
-        _ntfy(f"HANDLER OK: id={job_id}, elapsed={elapsed}s, result_keys={result_summary}")
+        result_summary = (
+            {k: type(v).__name__ for k, v in result.items()}
+            if isinstance(result, dict)
+            else str(type(result))
+        )
+        _ntfy(
+            f"HANDLER OK [{_COMMIT}]: id={job_id}, elapsed={elapsed}s, "
+            f"result={result_summary}"
+        )
         return result
     except Exception as e:
-        _ntfy(f"HANDLER ERROR: id={job_id}, err={type(e).__name__}: {e}")
+        _ntfy(f"HANDLER ERROR [{_COMMIT}]: id={job_id}, err={type(e).__name__}: {e}")
         raise
 
 
