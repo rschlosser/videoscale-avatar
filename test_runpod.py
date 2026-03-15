@@ -17,7 +17,7 @@ import time
 import urllib.request
 import urllib.error
 
-ENDPOINT_ID = "ji8wsxtn9m7za9"
+ENDPOINT_ID = "2rh7kx3zmee8iw"
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 DEFAULT_IMAGE = os.path.join(MEDIA_DIR, "ai_4ab86e0c.png")
 DEFAULT_AUDIO = os.path.join(MEDIA_DIR, "ElevenLabs_2026-03-11T16_20_57_Bella - Professional, Bright, Warm_pre_sp100_s40_sb70_se55_b_m2.mp3")
@@ -36,29 +36,57 @@ def main():
     parser.add_argument("--endpoint", default=ENDPOINT_ID, help="RunPod endpoint ID")
     parser.add_argument("--timeout", type=int, default=MAX_POLL_TIME, help="Max seconds to wait for job")
     parser.add_argument("--sync", action="store_true", help="Use /runsync instead of /run + polling")
+    parser.add_argument("--ping", action="store_true", help="Send a ping job instead of video generation")
+    parser.add_argument("--debug", action="store_true", help="Send a debug job (loads models, tests face detection)")
+    parser.add_argument("--health", action="store_true", help="Check endpoint health and exit")
     args = parser.parse_args()
 
     if not args.api_key:
         print("Error: provide --api-key or set RUNPOD_API_KEY env var")
         sys.exit(1)
 
-    # Encode inputs
-    with open(args.image, "rb") as f:
-        image_b64 = base64.b64encode(f.read()).decode("ascii")
-    with open(args.audio, "rb") as f:
-        audio_b64 = base64.b64encode(f.read()).decode("ascii")
+    # Health check mode
+    if args.health:
+        health_url = f"https://api.runpod.ai/v2/{args.endpoint}/health"
+        req = urllib.request.Request(health_url, headers={"Authorization": f"Bearer {args.api_key}"})
+        try:
+            resp = urllib.request.urlopen(req, timeout=15)
+            data = json.loads(resp.read())
+            print(json.dumps(data, indent=2))
+        except Exception as e:
+            print(f"Health check failed: {e}")
+            sys.exit(1)
+        return
 
-    print(f"Image: {args.image} ({len(image_b64) // 1024} KB base64)")
-    print(f"Audio: {args.audio} ({len(audio_b64) // 1024} KB base64)")
+    # Build payload based on mode
+    if args.ping:
+        payload = json.dumps({"input": {"ping": True}}).encode("utf-8")
+        print("Sending ping job...")
+    elif args.debug:
+        input_data = {"debug": True}
+        if os.path.exists(args.image):
+            with open(args.image, "rb") as f:
+                input_data["image_base64"] = base64.b64encode(f.read()).decode("ascii")
+            print(f"Debug with image: {args.image}")
+        payload = json.dumps({"input": input_data}).encode("utf-8")
+        print("Sending debug job...")
+    else:
+        # Encode inputs
+        with open(args.image, "rb") as f:
+            image_b64 = base64.b64encode(f.read()).decode("ascii")
+        with open(args.audio, "rb") as f:
+            audio_b64 = base64.b64encode(f.read()).decode("ascii")
 
-    # Build payload
-    payload = json.dumps({
-        "input": {
-            "image_base64": image_b64,
-            "audio_base64": audio_b64,
-            "resolution": args.resolution,
-        }
-    }).encode("utf-8")
+        print(f"Image: {args.image} ({len(image_b64) // 1024} KB base64)")
+        print(f"Audio: {args.audio} ({len(audio_b64) // 1024} KB base64)")
+
+        payload = json.dumps({
+            "input": {
+                "image_base64": image_b64,
+                "audio_base64": audio_b64,
+                "resolution": args.resolution,
+            }
+        }).encode("utf-8")
 
     mode = "runsync" if args.sync else "run"
     url = f"https://api.runpod.ai/v2/{args.endpoint}/{mode}"
@@ -86,16 +114,22 @@ def main():
     status = result.get("status")
     print(f"Job submitted: {job_id} (status: {status})")
 
+    is_simple = args.ping or args.debug
+
     # If runsync, the result comes back directly
     if args.sync:
         if status == "COMPLETED":
-            handle_completed(result, args, t0)
+            if is_simple:
+                print(f"\nResult ({time.time() - t0:.0f}s):")
+                print(json.dumps(result.get("output", result), indent=2))
+            else:
+                handle_completed(result, args, t0)
         elif status == "FAILED":
             print(f"\nJob failed: {json.dumps(result, indent=2)}")
             sys.exit(1)
         elif status == "IN_QUEUE" or status == "IN_PROGRESS":
             print(f"\nJob didn't complete within runsync timeout. Falling back to polling...")
-            poll_for_result(args, job_id, t0)
+            poll_for_result(args, job_id, t0, simple_output=is_simple)
         else:
             print(f"\nUnexpected status: {status}")
             print(json.dumps(result, indent=2))
@@ -103,7 +137,7 @@ def main():
         return
 
     # Async mode: poll for completion
-    poll_for_result(args, job_id, t0)
+    poll_for_result(args, job_id, t0, simple_output=is_simple)
 
 
 def handle_completed(result, args, t0):
@@ -125,7 +159,7 @@ def handle_completed(result, args, t0):
         print(json.dumps(output, indent=2))
 
 
-def poll_for_result(args, job_id, t0):
+def poll_for_result(args, job_id, t0, simple_output=False):
     status_url = f"https://api.runpod.ai/v2/{args.endpoint}/status/{job_id}"
     while True:
         elapsed = time.time() - t0
@@ -149,10 +183,14 @@ def poll_for_result(args, job_id, t0):
         result = json.loads(resp.read())
         status = result.get("status")
         elapsed = time.time() - t0
-        print(f"  [{elapsed:.0f}s] Status: {status}")
+        print(f"  [{elapsed:.0f}s] {status}")
 
         if status == "COMPLETED":
-            handle_completed(result, args, t0)
+            if simple_output:
+                print(f"\nResult ({time.time() - t0:.0f}s):")
+                print(json.dumps(result.get("output", result), indent=2))
+            else:
+                handle_completed(result, args, t0)
             break
         elif status == "FAILED":
             print(f"\nJob failed: {json.dumps(result, indent=2)}")
