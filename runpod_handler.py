@@ -36,6 +36,47 @@ except Exception as e:
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
+# Diagnostic: print all RUNPOD_ env vars (webhook URLs, worker config)
+print("=== RunPod env vars ===", flush=True)
+for k, v in sorted(os.environ.items()):
+    if k.startswith("RUNPOD"):
+        # Mask API keys
+        if "KEY" in k or "SECRET" in k:
+            print(f"  {k}={v[:8]}...", flush=True)
+        else:
+            print(f"  {k}={v}", flush=True)
+print("=== End RunPod env vars ===", flush=True)
+
+# Diagnostic: test HTTPS connectivity at startup
+try:
+    import urllib.request
+    t0 = time.time()
+    resp = urllib.request.urlopen("https://api.runpod.ai/", timeout=10)
+    print(f"HTTPS test (urllib): {resp.status} in {time.time()-t0:.1f}s", flush=True)
+except Exception as e:
+    print(f"HTTPS test (urllib) FAILED: {e}", flush=True)
+
+try:
+    import requests as req_lib
+    t0 = time.time()
+    resp = req_lib.get("https://api.runpod.ai/", timeout=10)
+    print(f"HTTPS test (requests): {resp.status_code} in {time.time()-t0:.1f}s", flush=True)
+except Exception as e:
+    print(f"HTTPS test (requests) FAILED: {e}", flush=True)
+
+try:
+    import asyncio
+    import aiohttp
+    async def _test_aiohttp():
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://api.runpod.ai/", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                return resp.status
+    t0 = time.time()
+    status = asyncio.get_event_loop().run_until_complete(_test_aiohttp())
+    print(f"HTTPS test (aiohttp): {status} in {time.time()-t0:.1f}s", flush=True)
+except Exception as e:
+    print(f"HTTPS test (aiohttp) FAILED: {e}", flush=True)
+
 # Lazy model loading
 engine = None
 load_error = None
