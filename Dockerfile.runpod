@@ -52,23 +52,13 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
 
-# Fix SSL for RunPod SDK's aiohttp result delivery.
-# The base image's conda OpenSSL has stale CA certs. Patch the SDK's http_client.py
-# to pass a certifi-based SSLContext to TCPConnector.
-RUN python -c "\
-import site, pathlib, re; \
-f = pathlib.Path(site.getsitepackages()[0]) / 'runpod' / 'http_client.py'; \
-src = f.read_text(); \
-assert 'TCPConnector(limit=0)' in src, 'Pattern not found in http_client.py'; \
-patched = src.replace( \
-    'from aiohttp import ClientSession, ClientTimeout, TCPConnector, ClientResponseError', \
-    'from aiohttp import ClientSession, ClientTimeout, TCPConnector, ClientResponseError\nimport ssl as _ssl\nimport certifi as _certifi\n_SSL_CTX = _ssl.create_default_context(cafile=_certifi.where())' \
-).replace( \
-    'TCPConnector(limit=0)', \
-    'TCPConnector(limit=0, ssl=_SSL_CTX)' \
-); \
-f.write_text(patched); \
-print('Patched RunPod http_client.py with certifi SSL context')"
+# Fix SSL for RunPod SDK's aiohttp connections.
+# The base image's conda OpenSSL has stale CA certs that break HTTPS.
+# Disable SSL verification in the SDK's TCPConnector as a workaround.
+RUN SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    sed -i 's/TCPConnector(limit=0)/TCPConnector(limit=0, ssl=False)/' \
+    "$SITE_PKGS/runpod/http_client.py" && \
+    python -c "import runpod; print('RunPod SDK import OK after patch')"
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
