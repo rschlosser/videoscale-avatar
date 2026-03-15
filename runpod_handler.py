@@ -23,21 +23,43 @@ import runpod
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
-# Print library versions and env vars for diagnostics
+# --- MONKEY-PATCH: Replace aiohttp POST with requests POST for result delivery ---
+# The RunPod SDK uses aiohttp to POST job results to webhook URLs. On this base image
+# (conda OpenSSL), aiohttp POST requests consistently fail/timeout while requests
+# (used for heartbeat) works fine. Patch _transmit() to use requests instead.
 try:
-    import ssl
-    print(f"OpenSSL: {ssl.OPENSSL_VERSION}", flush=True)
-except Exception:
-    pass
-try:
-    import aiohttp
-    print(f"aiohttp: {aiohttp.__version__}", flush=True)
-except Exception:
-    pass
-for k, v in sorted(os.environ.items()):
-    if k.startswith("RUNPOD"):
-        val = v[:8] + "..." if ("KEY" in k or "SECRET" in k) else v
-        print(f"  {k}={val}", flush=True)
+    import requests as req_lib
+    import runpod.serverless.modules.rp_http as rp_http
+
+    _original_transmit = rp_http._transmit
+
+    async def _requests_transmit(client_session, url, job_data):
+        """Replace aiohttp POST with requests.post for result delivery."""
+        try:
+            headers = {
+                "charset": "utf-8",
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            # Copy auth header from the aiohttp session
+            if hasattr(client_session, '_default_headers'):
+                auth = client_session._default_headers.get("Authorization")
+                if auth:
+                    headers["Authorization"] = auth
+            elif os.environ.get("RUNPOD_AI_API_KEY"):
+                headers["Authorization"] = os.environ["RUNPOD_AI_API_KEY"]
+
+            t0 = time.time()
+            resp = req_lib.post(url, data=job_data, headers=headers, timeout=30)
+            print(f"  [requests POST] {url[:60]}... -> {resp.status_code} ({time.time()-t0:.1f}s)", flush=True)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  [requests POST] FAILED: {e}", flush=True)
+            raise
+
+    rp_http._transmit = _requests_transmit
+    print("Patched rp_http._transmit to use requests instead of aiohttp", flush=True)
+except Exception as e:
+    print(f"WARNING: Failed to patch _transmit: {e}", flush=True)
 
 # Lazy model loading
 engine = None
