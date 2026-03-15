@@ -47,7 +47,7 @@ except Exception as e:
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "8e8e596-v3"
+_COMMIT = "0cfd79d-v4"
 
 
 def _ntfy(msg):
@@ -91,13 +91,21 @@ if _ssl_ctx is not None:
 
         _http_client.AsyncClientSession = _PatchedAsyncClientSession
 
-        # Also patch the import in rp_scale which may have already imported it
-        try:
-            import runpod.serverless.modules.rp_scale as _rp_scale
-            if hasattr(_rp_scale, "AsyncClientSession"):
-                _rp_scale.AsyncClientSession = _PatchedAsyncClientSession
-        except Exception:
-            pass
+        # Also patch module-level imports in rp_scale and rp_progress
+        _patched_modules = []
+        for _mod_path in [
+            "runpod.serverless.modules.rp_scale",
+            "runpod.serverless.modules.rp_progress",
+        ]:
+            try:
+                import importlib
+                _mod = importlib.import_module(_mod_path)
+                if hasattr(_mod, "AsyncClientSession"):
+                    _mod.AsyncClientSession = _PatchedAsyncClientSession
+                    _patched_modules.append(_mod_path.split(".")[-1])
+            except Exception:
+                pass
+        print(f"SSL: patched modules: {_patched_modules}", flush=True)
 
         _ssl_patched = True
         print("SSL: patched AsyncClientSession with certifi SSL context", flush=True)
