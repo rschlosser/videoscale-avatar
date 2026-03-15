@@ -19,34 +19,25 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
-# --- FIX SSL FOR AIOHTTP (must be before any aiohttp imports) ---
-# The base image (conda OpenSSL) has stale/missing CA certs. aiohttp uses
-# ssl.create_default_context() which fails to verify HTTPS connections.
-# Fix: patch ssl.create_default_context to always use certifi's CA bundle.
-# This is the same approach requests/urllib3 uses internally.
-import ssl
+# --- Fix SSL at runtime ---
+# The base image (conda OpenSSL) has stale CA certs. Set SSL_CERT_FILE to
+# certifi's bundled certs so that ssl.create_default_context() (used by aiohttp)
+# picks up valid certificates. This is simpler and safer than monkey-patching
+# the ssl module.
+try:
+    import certifi
 
-import certifi
-
-_orig_create_default_context = ssl.create_default_context
-
-
-def _patched_create_default_context(
-    purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None
-):
-    if cafile is None:
-        cafile = certifi.where()
-    return _orig_create_default_context(
-        purpose, cafile=cafile, capath=capath, cadata=cadata
-    )
-
-
-ssl.create_default_context = _patched_create_default_context
-print(f"Patched ssl.create_default_context → certifi ({certifi.where()})", flush=True)
+    _certifi_ca = certifi.where()
+    os.environ["SSL_CERT_FILE"] = _certifi_ca
+    os.environ["REQUESTS_CA_BUNDLE"] = _certifi_ca
+    os.environ["CURL_CA_BUNDLE"] = _certifi_ca
+    print(f"SSL_CERT_FILE set to certifi: {_certifi_ca}", flush=True)
+except ImportError:
+    print("WARNING: certifi not installed, using system certs", flush=True)
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "5779b49-fix2"  # manual tag for version tracking
+_COMMIT = "77f8b36-v2"
 
 
 def _ntfy(msg):
@@ -71,7 +62,7 @@ print(
     flush=True,
 )
 
-# --- Log RunPod env vars ---
+# --- Print RunPod env vars ---
 env_lines = []
 print("=== RunPod environment ===", flush=True)
 for key in sorted(os.environ):
@@ -83,13 +74,96 @@ for key in sorted(os.environ):
         print(f"  {key}={val}", flush=True)
 print("=== End RunPod env ===", flush=True)
 
+# --- MONKEY-PATCH: Replace aiohttp POST with requests POST for result delivery ---
+# Even with SSL_CERT_FILE set, aiohttp may still have issues on this base image.
+# Replace _transmit() with a requests-based version as a safety net.
+# Use asyncio.to_thread to avoid blocking the event loop.
 try:
+    import asyncio
+    import requests as req_lib
     import runpod.serverless.modules.rp_http as rp_http
 
+    _original_transmit = rp_http._transmit
     _job_done_url = getattr(rp_http, "JOB_DONE_URL", "NOT SET")
+    print(f"Original _transmit: {_original_transmit}", flush=True)
     print(f"JOB_DONE_URL: {_job_done_url}", flush=True)
+
+    def _sync_post(url, job_data, auth_header):
+        """Synchronous POST — runs in thread pool."""
+        headers = {
+            "charset": "utf-8",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        if auth_header:
+            headers["Authorization"] = auth_header
+
+        t0 = time.time()
+        resp = req_lib.post(url, data=job_data, headers=headers, timeout=30)
+        elapsed = time.time() - t0
+        print(
+            f"  [_sync_post] -> {resp.status_code} ({elapsed:.1f}s) "
+            f"body={resp.text[:200]}",
+            flush=True,
+        )
+        resp.raise_for_status()
+        return resp.status_code
+
+    async def _requests_transmit(client_session, url, job_data):
+        """Replace aiohttp POST with requests.post in a thread pool."""
+        print(f"  [_requests_transmit CALLED] url={url}", flush=True)
+        print(
+            f"  [_requests_transmit] data_len="
+            f"{len(job_data) if job_data else 0}",
+            flush=True,
+        )
+
+        # Extract auth from aiohttp session or env
+        auth_header = None
+        try:
+            if (
+                client_session
+                and hasattr(client_session, "_default_headers")
+                and client_session._default_headers
+            ):
+                auth_header = client_session._default_headers.get(
+                    "Authorization"
+                )
+        except Exception:
+            pass
+
+        if not auth_header:
+            auth_header = os.environ.get("RUNPOD_AI_API_KEY")
+
+        if auth_header:
+            print(
+                f"  [_requests_transmit] auth: {str(auth_header)[:15]}...",
+                flush=True,
+            )
+        else:
+            print(
+                "  [_requests_transmit] WARNING: no auth found!", flush=True
+            )
+
+        try:
+            status = await asyncio.to_thread(
+                _sync_post, url, job_data, auth_header
+            )
+            _ntfy(f"TRANSMIT OK: url={url}, status={status}")
+            print("  [_requests_transmit] SUCCESS", flush=True)
+        except Exception as e:
+            _ntfy(f"TRANSMIT FAIL: url={url}, err={type(e).__name__}: {e}")
+            print(
+                f"  [_requests_transmit] FAILED: {type(e).__name__}: {e}",
+                flush=True,
+            )
+
+    rp_http._transmit = _requests_transmit
+    print(f"Patched _transmit OK", flush=True)
 except Exception as e:
-    _job_done_url = f"ERROR: {e}"
+    import traceback as _tb
+
+    print(f"WARNING: Failed to patch _transmit: {e}", flush=True)
+    _tb.print_exc()
 
 _ntfy(
     f"STARTUP [{_COMMIT}]: runpod={getattr(runpod, '__version__', '?')}, "
@@ -127,18 +201,17 @@ def _real_handler(job):
     """RunPod serverless handler — actual logic."""
     input_data = job["input"]
 
-    # Ping: instant return + diagnostics
+    # Ping
     if input_data.get("ping"):
-        diag = {
+        return {
             "pong": True,
             "models_loaded": engine.models_loaded if engine else False,
             "uptime": round(time.time() - t_module_start, 1),
             "runpod_version": getattr(runpod, "__version__", "?"),
             "commit": _COMMIT,
         }
-        return diag
 
-    # Debug: test model loading
+    # Debug
     if input_data.get("debug"):
         import base64
         import tempfile
@@ -188,7 +261,9 @@ def _real_handler(job):
                 except Exception as e:
                     import traceback as tb
 
-                    results["prepare_source_error"] = f"{e}\n{tb.format_exc()}"
+                    results["prepare_source_error"] = (
+                        f"{e}\n{tb.format_exc()}"
+                    )
 
         return results
 
@@ -253,34 +328,41 @@ def _real_handler(job):
 def handler(job):
     """Wrapper handler with ntfy diagnostics."""
     job_id = job.get("id", "unknown")
-    _ntfy(f"HANDLER CALLED [{_COMMIT}]: id={job_id}, keys={list(job.get('input', {}).keys())}")
+    _ntfy(
+        f"HANDLER CALLED [{_COMMIT}]: id={job_id}, "
+        f"keys={list(job.get('input', {}).keys())}"
+    )
     try:
         t0 = time.time()
         result = _real_handler(job)
         elapsed = round(time.time() - t0, 2)
-        result_summary = (
-            {k: type(v).__name__ for k, v in result.items()}
-            if isinstance(result, dict)
-            else str(type(result))
+        result_keys = (
+            list(result.keys()) if isinstance(result, dict) else "non-dict"
         )
         _ntfy(
-            f"HANDLER OK [{_COMMIT}]: id={job_id}, elapsed={elapsed}s, "
-            f"result={result_summary}"
+            f"HANDLER OK [{_COMMIT}]: id={job_id}, "
+            f"elapsed={elapsed}s, keys={result_keys}"
         )
         return result
     except Exception as e:
-        _ntfy(f"HANDLER ERROR [{_COMMIT}]: id={job_id}, err={type(e).__name__}: {e}")
+        _ntfy(
+            f"HANDLER ERROR [{_COMMIT}]: id={job_id}, "
+            f"err={type(e).__name__}: {e}"
+        )
         raise
 
 
 print(
-    f"Registering handler ({time.time() - t_module_start:.1f}s since module load)...",
+    f"Registering handler ({time.time() - t_module_start:.1f}s "
+    f"since module load)...",
     flush=True,
 )
 try:
     runpod.serverless.start({"handler": handler})
 except Exception as e:
-    print(f"CRITICAL: runpod.serverless.start() CRASHED: {e}", flush=True)
+    print(
+        f"CRITICAL: runpod.serverless.start() CRASHED: {e}", flush=True
+    )
     import traceback
 
     traceback.print_exc()
