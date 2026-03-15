@@ -49,6 +49,24 @@ import runpod
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
+# Print library versions for diagnostics
+try:
+    import aiohttp
+    print(f"aiohttp: {aiohttp.__version__}", flush=True)
+except Exception:
+    pass
+try:
+    import requests as _req
+    print(f"requests: {_req.__version__}", flush=True)
+except Exception:
+    pass
+
+# Print RUNPOD_ env vars (webhook URLs are critical for debugging result delivery)
+for k, v in sorted(os.environ.items()):
+    if k.startswith("RUNPOD"):
+        val = v[:8] + "..." if ("KEY" in k or "SECRET" in k) else v
+        print(f"  {k}={val}", flush=True)
+
 # Lazy model loading
 engine = None
 load_error = None

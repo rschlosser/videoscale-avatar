@@ -3,8 +3,8 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.6
 
-# RunPod serverless SDK
-runpod>=1.6.0
+# RunPod serverless SDK (pin to 1.7.7 — versions >1.7.10 have worker routing bug #432)
+runpod==1.7.7
 
 # SSL certificates for aiohttp (RunPod SDK uses aiohttp for webhook delivery)
 certifi
