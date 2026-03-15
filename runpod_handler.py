@@ -21,6 +21,24 @@ print(f"CWD: {os.getcwd()}", flush=True)
 
 import runpod
 
+# Monkey-patch RunPod SDK to disable SSL verification for aiohttp.
+# The base image's conda OpenSSL has stale CA certs that prevent the SDK from
+# delivering job results via HTTPS webhooks. We replace TCPConnector in the
+# SDK's http_client module so AsyncClientSession() uses ssl=False.
+try:
+    from aiohttp import TCPConnector as _OrigTCPConnector
+
+    class _NoSSLTCPConnector(_OrigTCPConnector):
+        def __init__(self, *args, **kwargs):
+            kwargs.setdefault("ssl", False)
+            super().__init__(*args, **kwargs)
+
+    import runpod.http_client
+    runpod.http_client.TCPConnector = _NoSSLTCPConnector
+    print("Patched TCPConnector with ssl=False", flush=True)
+except Exception as e:
+    print(f"WARNING: Failed to patch TCPConnector: {e}", flush=True)
+
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
 # Lazy model loading
