@@ -5,6 +5,8 @@ Run this during Docker build or on first startup.
 Downloads FasterLivePortrait ONNX models + JoyVASA + HuBERT checkpoints.
 """
 
+import os
+
 from huggingface_hub import snapshot_download
 
 CHECKPOINT_DIR = "/app/checkpoints"
@@ -29,6 +31,11 @@ MODELS = [
 
 
 def download():
+    # Ensure checkpoint dirs exist (huggingface_hub needs .huggingface/ for lock files)
+    for model in MODELS:
+        os.makedirs(model["local_dir"], exist_ok=True)
+    os.makedirs(os.path.join(CHECKPOINT_DIR, ".huggingface"), exist_ok=True)
+
     for model in MODELS:
         print(f"\n--- Downloading {model['repo']} ---")
         snapshot_download(
