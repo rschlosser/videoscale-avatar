@@ -21,23 +21,42 @@ print(f"CWD: {os.getcwd()}", flush=True)
 
 import runpod
 
-# Monkey-patch RunPod SDK to disable SSL verification for aiohttp.
+# Monkey-patch RunPod SDK to disable SSL verification for ALL aiohttp connections.
 # The base image's conda OpenSSL has stale CA certs that prevent the SDK from
-# delivering job results via HTTPS webhooks. We replace TCPConnector in the
-# SDK's http_client module so AsyncClientSession() uses ssl=False.
+# delivering job results via HTTPS webhooks.
 try:
-    from aiohttp import TCPConnector as _OrigTCPConnector
+    from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
-    class _NoSSLTCPConnector(_OrigTCPConnector):
-        def __init__(self, *args, **kwargs):
-            kwargs.setdefault("ssl", False)
-            super().__init__(*args, **kwargs)
+    def _patched_session(*args, **kwargs):
+        """Replacement AsyncClientSession that uses ssl=False."""
+        from runpod.http_client import get_auth_header
+        return ClientSession(
+            connector=TCPConnector(limit=0, ssl=False),
+            headers=get_auth_header(),
+            timeout=ClientTimeout(600, ceil_threshold=400),
+            *args, **kwargs,
+        )
 
+    # Patch the factory in http_client AND all modules that import it
     import runpod.http_client
-    runpod.http_client.TCPConnector = _NoSSLTCPConnector
-    print("Patched TCPConnector with ssl=False", flush=True)
+    runpod.http_client.AsyncClientSession = _patched_session
+
+    for mod_name in [
+        "runpod.serverless.modules.rp_scale",
+        "runpod.serverless.modules.rp_http",
+        "runpod.serverless.modules.rp_progress",
+    ]:
+        try:
+            mod = __import__(mod_name, fromlist=["AsyncClientSession"])
+            if hasattr(mod, "AsyncClientSession"):
+                mod.AsyncClientSession = _patched_session
+                print(f"  Patched {mod_name}", flush=True)
+        except Exception:
+            pass
+
+    print("Patched AsyncClientSession with ssl=False", flush=True)
 except Exception as e:
-    print(f"WARNING: Failed to patch TCPConnector: {e}", flush=True)
+    print(f"WARNING: Failed to patch AsyncClientSession: {e}", flush=True)
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
