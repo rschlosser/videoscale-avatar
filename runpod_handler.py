@@ -7,6 +7,7 @@ Heavy imports (torch, cv2, etc.) are deferred to first job.
 
 import logging
 import os
+import ssl
 import sys
 import time
 
@@ -19,63 +20,34 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
+# --- SSL FIX ---
+# The base image's conda OpenSSL has stale/missing CA certs. The Dockerfile copies
+# certifi's bundle to /etc/ssl/certs/ca-certificates.crt and sets SSL_CERT_FILE,
+# but conda's OpenSSL may ignore that env var depending on compile-time options.
+#
+# Fix: monkey-patch ssl.create_default_context to ALWAYS load our cert bundle.
+# This MUST happen before importing runpod/aiohttp, because aiohttp creates its
+# SSL contexts at module import time.
+CERT_FILE = "/etc/ssl/certs/ca-certificates.crt"
+_orig_create_default_context = ssl.create_default_context
+
+def _create_default_context_with_certs(purpose=ssl.Purpose.SERVER_AUTH, *args, **kwargs):
+    ctx = _orig_create_default_context(purpose, *args, **kwargs)
+    try:
+        ctx.load_verify_locations(CERT_FILE)
+        print(f"  [ssl patch] loaded {CERT_FILE} into context", flush=True)
+    except Exception as e:
+        print(f"  [ssl patch] failed to load {CERT_FILE}: {e}", flush=True)
+    return ctx
+
+ssl.create_default_context = _create_default_context_with_certs
+print(f"Patched ssl.create_default_context to load {CERT_FILE}", flush=True)
+print(f"OpenSSL: {ssl.OPENSSL_VERSION}", flush=True)
+
+# Now import runpod (which imports aiohttp, which creates SSL contexts)
 import runpod
 
-# SSL is now handled via env vars (SSL_CERT_FILE, REQUESTS_CA_BUNDLE) set in Dockerfile.
-# Verify they're set at startup for debugging.
-print(f"SSL_CERT_FILE={os.environ.get('SSL_CERT_FILE', 'NOT SET')}", flush=True)
-print(f"REQUESTS_CA_BUNDLE={os.environ.get('REQUESTS_CA_BUNDLE', 'NOT SET')}", flush=True)
-
-# Print OpenSSL version for diagnostics
-try:
-    import ssl
-    print(f"OpenSSL: {ssl.OPENSSL_VERSION}", flush=True)
-    print(f"Verify paths: {ssl.get_default_verify_paths()}", flush=True)
-except Exception as e:
-    print(f"SSL info error: {e}", flush=True)
-
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
-
-# Diagnostic: print all RUNPOD_ env vars (webhook URLs, worker config)
-print("=== RunPod env vars ===", flush=True)
-for k, v in sorted(os.environ.items()):
-    if k.startswith("RUNPOD"):
-        # Mask API keys
-        if "KEY" in k or "SECRET" in k:
-            print(f"  {k}={v[:8]}...", flush=True)
-        else:
-            print(f"  {k}={v}", flush=True)
-print("=== End RunPod env vars ===", flush=True)
-
-# Diagnostic: test HTTPS connectivity at startup
-try:
-    import urllib.request
-    t0 = time.time()
-    resp = urllib.request.urlopen("https://api.runpod.ai/", timeout=10)
-    print(f"HTTPS test (urllib): {resp.status} in {time.time()-t0:.1f}s", flush=True)
-except Exception as e:
-    print(f"HTTPS test (urllib) FAILED: {e}", flush=True)
-
-try:
-    import requests as req_lib
-    t0 = time.time()
-    resp = req_lib.get("https://api.runpod.ai/", timeout=10)
-    print(f"HTTPS test (requests): {resp.status_code} in {time.time()-t0:.1f}s", flush=True)
-except Exception as e:
-    print(f"HTTPS test (requests) FAILED: {e}", flush=True)
-
-try:
-    import asyncio
-    import aiohttp
-    async def _test_aiohttp():
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.runpod.ai/", timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                return resp.status
-    t0 = time.time()
-    status = asyncio.get_event_loop().run_until_complete(_test_aiohttp())
-    print(f"HTTPS test (aiohttp): {status} in {time.time()-t0:.1f}s", flush=True)
-except Exception as e:
-    print(f"HTTPS test (aiohttp) FAILED: {e}", flush=True)
 
 # Lazy model loading
 engine = None
