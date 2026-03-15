@@ -21,42 +21,18 @@ print(f"CWD: {os.getcwd()}", flush=True)
 
 import runpod
 
-# Monkey-patch RunPod SDK to disable SSL verification for ALL aiohttp connections.
-# The base image's conda OpenSSL has stale CA certs that prevent the SDK from
-# delivering job results via HTTPS webhooks.
+# SSL is now handled via env vars (SSL_CERT_FILE, REQUESTS_CA_BUNDLE) set in Dockerfile.
+# Verify they're set at startup for debugging.
+print(f"SSL_CERT_FILE={os.environ.get('SSL_CERT_FILE', 'NOT SET')}", flush=True)
+print(f"REQUESTS_CA_BUNDLE={os.environ.get('REQUESTS_CA_BUNDLE', 'NOT SET')}", flush=True)
+
+# Print OpenSSL version for diagnostics
 try:
-    from aiohttp import ClientSession, ClientTimeout, TCPConnector
-
-    def _patched_session(*args, **kwargs):
-        """Replacement AsyncClientSession that uses ssl=False."""
-        from runpod.http_client import get_auth_header
-        return ClientSession(
-            connector=TCPConnector(limit=0, ssl=False),
-            headers=get_auth_header(),
-            timeout=ClientTimeout(600, ceil_threshold=400),
-            *args, **kwargs,
-        )
-
-    # Patch the factory in http_client AND all modules that import it
-    import runpod.http_client
-    runpod.http_client.AsyncClientSession = _patched_session
-
-    for mod_name in [
-        "runpod.serverless.modules.rp_scale",
-        "runpod.serverless.modules.rp_http",
-        "runpod.serverless.modules.rp_progress",
-    ]:
-        try:
-            mod = __import__(mod_name, fromlist=["AsyncClientSession"])
-            if hasattr(mod, "AsyncClientSession"):
-                mod.AsyncClientSession = _patched_session
-                print(f"  Patched {mod_name}", flush=True)
-        except Exception:
-            pass
-
-    print("Patched AsyncClientSession with ssl=False", flush=True)
+    import ssl
+    print(f"OpenSSL: {ssl.OPENSSL_VERSION}", flush=True)
+    print(f"Verify paths: {ssl.get_default_verify_paths()}", flush=True)
 except Exception as e:
-    print(f"WARNING: Failed to patch AsyncClientSession: {e}", flush=True)
+    print(f"SSL info error: {e}", flush=True)
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 

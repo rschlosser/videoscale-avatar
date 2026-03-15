@@ -52,12 +52,20 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
 
-# Fix SSL certificates — base image ships stale CA certs.
-# Copy certifi CA bundle to system cert location (for requests.Session/heartbeat).
-# aiohttp SSL is handled at runtime via monkey-patch in runpod_handler.py.
+# Fix SSL certificates — base image's conda OpenSSL has stale CA certs.
+# 1. Copy certifi bundle to system + conda OpenSSL cert paths
+# 2. Set SSL_CERT_FILE env var so OpenSSL always finds certs regardless of compile-time paths
 RUN CERTIFI_CA=$(python -c "import certifi; print(certifi.where())") && \
     cp "$CERTIFI_CA" /etc/ssl/certs/ca-certificates.crt && \
-    echo "System CA certs updated from certifi"
+    OPENSSL_CAFILE=$(python -c "import ssl; print(ssl.get_default_verify_paths().openssl_cafile)") && \
+    mkdir -p "$(dirname "$OPENSSL_CAFILE")" && cp "$CERTIFI_CA" "$OPENSSL_CAFILE" && \
+    echo "CA certs: $CERTIFI_CA -> /etc/ssl/certs/ca-certificates.crt + $OPENSSL_CAFILE" && \
+    python -c "import ssl; print('OpenSSL:', ssl.OPENSSL_VERSION); print('Verify paths:', ssl.get_default_verify_paths())"
+
+# Force OpenSSL to use our cert bundle for ALL Python SSL connections (requests, aiohttp, urllib)
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
