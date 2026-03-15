@@ -19,70 +19,114 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
+# --- FIX SSL FOR AIOHTTP ---
+# The base image (conda OpenSSL) has stale CA certs. We've copied certifi's bundle
+# to /etc/ssl/certs/ca-certificates.crt and set SSL_CERT_FILE, but aiohttp's SSL
+# context may not pick it up. Patch ssl.create_default_context to always load our certs.
+import ssl
+_orig_create_default_context = ssl.create_default_context
+
+def _patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
+    ctx = _orig_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
+    cert_file = os.environ.get("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+    try:
+        ctx.load_verify_locations(cert_file)
+    except Exception:
+        pass
+    return ctx
+
+ssl.create_default_context = _patched_create_default_context
+print(f"Patched ssl.create_default_context to load {os.environ.get('SSL_CERT_FILE', '/etc/ssl/certs/ca-certificates.crt')}", flush=True)
+
 import runpod
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
+# --- External diagnostic logging via ntfy.sh ---
+NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
+
+def _ntfy(msg):
+    """Fire-and-forget POST to ntfy.sh for external diagnostics."""
+    try:
+        import requests as _r
+        _r.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=str(msg)[:4000], timeout=5)
+    except Exception:
+        pass
+
 # --- Print all RunPod env vars for debugging ---
+env_lines = []
 print("=== RunPod environment ===", flush=True)
 for key in sorted(os.environ):
     if key.startswith("RUNPOD"):
         val = os.environ[key]
-        # Mask API keys
         if "KEY" in key or "SECRET" in key:
             val = val[:8] + "..." if len(val) > 8 else "***"
+        env_lines.append(f"  {key}={val}")
         print(f"  {key}={val}", flush=True)
 print("=== End RunPod env ===", flush=True)
 
 # --- MONKEY-PATCH: Replace aiohttp POST with requests POST for result delivery ---
-# The RunPod SDK uses aiohttp to POST job results to webhook URLs. On this base image
-# (conda OpenSSL), aiohttp POST requests consistently fail/timeout while requests
-# (used for heartbeat) works fine. Patch _transmit() to use requests instead.
+# Keep this as a safety net in case the SSL fix alone isn't enough.
 try:
-    import json as _json
+    import asyncio
     import requests as req_lib
     import runpod.serverless.modules.rp_http as rp_http
 
     _original_transmit = rp_http._transmit
+    _job_done_url = getattr(rp_http, 'JOB_DONE_URL', 'NOT SET')
     print(f"Original _transmit: {_original_transmit}", flush=True)
-    print(f"JOB_DONE_URL from rp_http: {getattr(rp_http, 'JOB_DONE_URL', 'NOT SET')}", flush=True)
+    print(f"JOB_DONE_URL: {_job_done_url}", flush=True)
+
+    _ntfy(f"STARTUP: runpod={getattr(runpod, '__version__', '?')}, JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines))
+
+    def _sync_post(url, job_data, auth_header):
+        """Synchronous POST via requests — runs in a thread to avoid blocking event loop."""
+        headers = {
+            "charset": "utf-8",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+        if auth_header:
+            headers["Authorization"] = auth_header
+
+        t0 = time.time()
+        resp = req_lib.post(url, data=job_data, headers=headers, timeout=30)
+        elapsed = time.time() - t0
+        print(f"  [_sync_post] -> {resp.status_code} ({elapsed:.1f}s) body={resp.text[:200]}", flush=True)
+        resp.raise_for_status()
+        return resp.status_code
 
     async def _requests_transmit(client_session, url, job_data):
-        """Replace aiohttp POST with requests.post for result delivery."""
+        """Replace aiohttp POST with requests.post in a thread pool."""
         print(f"  [_requests_transmit CALLED] url={url}", flush=True)
         print(f"  [_requests_transmit] data_len={len(job_data) if job_data else 0}", flush=True)
-        try:
-            headers = {
-                "charset": "utf-8",
-                "Content-Type": "application/x-www-form-urlencoded",
-            }
-            # Copy auth header from the aiohttp session
-            if hasattr(client_session, '_default_headers'):
-                auth = client_session._default_headers.get("Authorization")
-                if auth:
-                    headers["Authorization"] = auth
-                    print(f"  [_requests_transmit] auth from session: {auth[:12]}...", flush=True)
-            elif os.environ.get("RUNPOD_AI_API_KEY"):
-                headers["Authorization"] = os.environ["RUNPOD_AI_API_KEY"]
-                print(f"  [_requests_transmit] auth from env", flush=True)
-            else:
-                print(f"  [_requests_transmit] WARNING: no auth found!", flush=True)
 
-            t0 = time.time()
-            resp = req_lib.post(url, data=job_data, headers=headers, timeout=30)
-            elapsed = time.time() - t0
-            print(f"  [_requests_transmit] -> {resp.status_code} ({elapsed:.1f}s)", flush=True)
-            print(f"  [_requests_transmit] response body: {resp.text[:200]}", flush=True)
-            resp.raise_for_status()
+        # Extract auth from aiohttp session
+        auth_header = None
+        try:
+            if client_session and hasattr(client_session, '_default_headers') and client_session._default_headers:
+                auth_header = client_session._default_headers.get("Authorization")
+                if auth_header:
+                    print(f"  [_requests_transmit] auth from session: {str(auth_header)[:15]}...", flush=True)
+        except Exception as e:
+            print(f"  [_requests_transmit] auth extraction error: {e}", flush=True)
+
+        if not auth_header and os.environ.get("RUNPOD_AI_API_KEY"):
+            auth_header = os.environ["RUNPOD_AI_API_KEY"]
+            print(f"  [_requests_transmit] auth from env", flush=True)
+
+        if not auth_header:
+            print(f"  [_requests_transmit] WARNING: no auth found!", flush=True)
+
+        try:
+            # Run blocking POST in thread to avoid blocking the event loop
+            status = await asyncio.to_thread(_sync_post, url, job_data, auth_header)
+            _ntfy(f"TRANSMIT OK: url={url}, status={status}")
             print(f"  [_requests_transmit] SUCCESS", flush=True)
         except Exception as e:
+            _ntfy(f"TRANSMIT FAIL: url={url}, err={type(e).__name__}: {e}")
             print(f"  [_requests_transmit] FAILED: {type(e).__name__}: {e}", flush=True)
-            # Don't re-raise — _handle_result only catches ClientError/TypeError/RuntimeError.
-            # If we raise a requests exception, it propagates uncaught and may crash the worker.
-            # Instead, just log and return silently — the job result was attempted.
 
     rp_http._transmit = _requests_transmit
-    # Verify patch stuck
     print(f"Patched _transmit: {rp_http._transmit}", flush=True)
     print(f"Patch verified: {rp_http._transmit is _requests_transmit}", flush=True)
 except Exception as e:
@@ -118,11 +162,12 @@ def _ensure_models():
 def handler(job):
     """RunPod serverless handler."""
     input_data = job["input"]
-    logger.info("Job received: keys=%s", list(input_data.keys()))
+    job_id = job.get("id", "unknown")
+    logger.info("Job received: id=%s keys=%s", job_id, list(input_data.keys()))
+    _ntfy(f"JOB START: id={job_id}, keys={list(input_data.keys())}")
 
     # Ping: instant return + diagnostics
     if input_data.get("ping"):
-        import requests as _req
         import runpod.serverless.modules.rp_http as _rp_http
         diag = {
             "pong": True,
@@ -133,14 +178,7 @@ def handler(job):
             "job_done_url": getattr(_rp_http, 'JOB_DONE_URL', 'NOT SET'),
             "webhook_post_output": os.environ.get('RUNPOD_WEBHOOK_POST_OUTPUT', 'NOT SET'),
         }
-        # Test outbound POST
-        try:
-            t0 = time.time()
-            r = _req.post("https://httpbin.org/post", data='{"test":true}',
-                          headers={"Content-Type": "application/json"}, timeout=10)
-            diag["outbound_post_test"] = {"status": r.status_code, "time": round(time.time() - t0, 2)}
-        except Exception as e:
-            diag["outbound_post_test"] = {"error": str(e)}
+        _ntfy(f"PING RETURN: {diag}")
         print(f"  [PING] diag={diag}", flush=True)
         return diag
 
@@ -157,6 +195,7 @@ def handler(job):
         except Exception as e:
             results["models_loaded"] = False
             results["load_error"] = str(load_error)
+            _ntfy(f"DEBUG RETURN (load fail): {results}")
             return results
 
         # If image provided, test face detection
@@ -193,6 +232,7 @@ def handler(job):
                     import traceback as tb
                     results["prepare_source_error"] = f"{e}\n{tb.format_exc()}"
 
+        _ntfy(f"DEBUG RETURN: {results}")
         return results
 
     # Normal: generate video
