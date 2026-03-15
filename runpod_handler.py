@@ -23,18 +23,34 @@ import runpod
 
 print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
 
+# --- Print all RunPod env vars for debugging ---
+print("=== RunPod environment ===", flush=True)
+for key in sorted(os.environ):
+    if key.startswith("RUNPOD"):
+        val = os.environ[key]
+        # Mask API keys
+        if "KEY" in key or "SECRET" in key:
+            val = val[:8] + "..." if len(val) > 8 else "***"
+        print(f"  {key}={val}", flush=True)
+print("=== End RunPod env ===", flush=True)
+
 # --- MONKEY-PATCH: Replace aiohttp POST with requests POST for result delivery ---
 # The RunPod SDK uses aiohttp to POST job results to webhook URLs. On this base image
 # (conda OpenSSL), aiohttp POST requests consistently fail/timeout while requests
 # (used for heartbeat) works fine. Patch _transmit() to use requests instead.
 try:
+    import json as _json
     import requests as req_lib
     import runpod.serverless.modules.rp_http as rp_http
 
     _original_transmit = rp_http._transmit
+    print(f"Original _transmit: {_original_transmit}", flush=True)
+    print(f"JOB_DONE_URL from rp_http: {getattr(rp_http, 'JOB_DONE_URL', 'NOT SET')}", flush=True)
 
     async def _requests_transmit(client_session, url, job_data):
         """Replace aiohttp POST with requests.post for result delivery."""
+        print(f"  [_requests_transmit CALLED] url={url}", flush=True)
+        print(f"  [_requests_transmit] data_len={len(job_data) if job_data else 0}", flush=True)
         try:
             headers = {
                 "charset": "utf-8",
@@ -45,21 +61,34 @@ try:
                 auth = client_session._default_headers.get("Authorization")
                 if auth:
                     headers["Authorization"] = auth
+                    print(f"  [_requests_transmit] auth from session: {auth[:12]}...", flush=True)
             elif os.environ.get("RUNPOD_AI_API_KEY"):
                 headers["Authorization"] = os.environ["RUNPOD_AI_API_KEY"]
+                print(f"  [_requests_transmit] auth from env", flush=True)
+            else:
+                print(f"  [_requests_transmit] WARNING: no auth found!", flush=True)
 
             t0 = time.time()
             resp = req_lib.post(url, data=job_data, headers=headers, timeout=30)
-            print(f"  [requests POST] {url[:60]}... -> {resp.status_code} ({time.time()-t0:.1f}s)", flush=True)
+            elapsed = time.time() - t0
+            print(f"  [_requests_transmit] -> {resp.status_code} ({elapsed:.1f}s)", flush=True)
+            print(f"  [_requests_transmit] response body: {resp.text[:200]}", flush=True)
             resp.raise_for_status()
+            print(f"  [_requests_transmit] SUCCESS", flush=True)
         except Exception as e:
-            print(f"  [requests POST] FAILED: {e}", flush=True)
-            raise
+            print(f"  [_requests_transmit] FAILED: {type(e).__name__}: {e}", flush=True)
+            # Don't re-raise — _handle_result only catches ClientError/TypeError/RuntimeError.
+            # If we raise a requests exception, it propagates uncaught and may crash the worker.
+            # Instead, just log and return silently — the job result was attempted.
 
     rp_http._transmit = _requests_transmit
-    print("Patched rp_http._transmit to use requests instead of aiohttp", flush=True)
+    # Verify patch stuck
+    print(f"Patched _transmit: {rp_http._transmit}", flush=True)
+    print(f"Patch verified: {rp_http._transmit is _requests_transmit}", flush=True)
 except Exception as e:
+    import traceback as _tb
     print(f"WARNING: Failed to patch _transmit: {e}", flush=True)
+    _tb.print_exc()
 
 # Lazy model loading
 engine = None
@@ -91,14 +120,29 @@ def handler(job):
     input_data = job["input"]
     logger.info("Job received: keys=%s", list(input_data.keys()))
 
-    # Ping: instant return
+    # Ping: instant return + diagnostics
     if input_data.get("ping"):
-        return {
+        import requests as _req
+        import runpod.serverless.modules.rp_http as _rp_http
+        diag = {
             "pong": True,
             "models_loaded": engine.models_loaded if engine else False,
             "uptime": round(time.time() - t_module_start, 1),
             "runpod_version": getattr(runpod, '__version__', '?'),
+            "transmit_patched": "requests_transmit" in str(_rp_http._transmit),
+            "job_done_url": getattr(_rp_http, 'JOB_DONE_URL', 'NOT SET'),
+            "webhook_post_output": os.environ.get('RUNPOD_WEBHOOK_POST_OUTPUT', 'NOT SET'),
         }
+        # Test outbound POST
+        try:
+            t0 = time.time()
+            r = _req.post("https://httpbin.org/post", data='{"test":true}',
+                          headers={"Content-Type": "application/json"}, timeout=10)
+            diag["outbound_post_test"] = {"status": r.status_code, "time": round(time.time() - t0, 2)}
+        except Exception as e:
+            diag["outbound_post_test"] = {"error": str(e)}
+        print(f"  [PING] diag={diag}", flush=True)
+        return diag
 
     # Debug: test model loading
     if input_data.get("debug"):
