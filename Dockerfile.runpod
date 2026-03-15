@@ -52,13 +52,16 @@ RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_p
 RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
     /app/FasterLivePortrait/src/models/predictor.py
 
-# Fix SSL for RunPod SDK's aiohttp connections.
-# The base image's conda OpenSSL has stale CA certs that break HTTPS.
-# Disable SSL verification in the SDK's TCPConnector as a workaround.
-RUN SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])") && \
+# Fix SSL certificates — base image ships stale certs.
+# 1. Copy certifi CA bundle to system cert location (for requests/heartbeat)
+# 2. Patch RunPod SDK's TCPConnector to skip SSL verify (for aiohttp/result delivery)
+RUN CERTIFI_CA=$(python -c "import certifi; print(certifi.where())") && \
+    cp "$CERTIFI_CA" /etc/ssl/certs/ca-certificates.crt && \
+    echo "System CA certs updated from certifi" && \
+    SITE_PKGS=$(python -c "import site; print(site.getsitepackages()[0])") && \
     sed -i 's/TCPConnector(limit=0)/TCPConnector(limit=0, ssl=False)/' \
     "$SITE_PKGS/runpod/http_client.py" && \
-    python -c "import runpod; print('RunPod SDK import OK after patch')"
+    python -c "import runpod; print('RunPod SDK patched OK')"
 
 # Add FasterLivePortrait to Python path
 ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
