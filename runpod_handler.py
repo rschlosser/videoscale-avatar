@@ -19,11 +19,13 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
-# --- Fix SSL at runtime ---
-# The base image (conda OpenSSL) has stale CA certs. Set SSL_CERT_FILE to
-# certifi's bundled certs so that ssl.create_default_context() (used by aiohttp)
-# picks up valid certificates. This is simpler and safer than monkey-patching
-# the ssl module.
+# --- Fix SSL for aiohttp ---
+# The base image (conda OpenSSL) has stale CA certs. SSL_CERT_FILE env var
+# alone doesn't fix aiohttp because ssl.create_default_context() on this
+# OpenSSL build doesn't respect it. We must patch ssl.create_default_context
+# to explicitly use certifi's CA bundle.
+import ssl
+
 try:
     import certifi
 
@@ -31,13 +33,35 @@ try:
     os.environ["SSL_CERT_FILE"] = _certifi_ca
     os.environ["REQUESTS_CA_BUNDLE"] = _certifi_ca
     os.environ["CURL_CA_BUNDLE"] = _certifi_ca
-    print(f"SSL_CERT_FILE set to certifi: {_certifi_ca}", flush=True)
+
+    _orig_create_ctx = ssl.create_default_context
+
+    def _patched_create_ctx(
+        purpose=ssl.Purpose.SERVER_AUTH,
+        *,
+        cafile=None,
+        capath=None,
+        cadata=None,
+    ):
+        if cafile is None and capath is None and cadata is None:
+            cafile = _certifi_ca
+        return _orig_create_ctx(
+            purpose, cafile=cafile, capath=capath, cadata=cadata
+        )
+
+    ssl.create_default_context = _patched_create_ctx
+    print(
+        f"SSL: patched create_default_context + env vars → {_certifi_ca}",
+        flush=True,
+    )
 except ImportError:
     print("WARNING: certifi not installed, using system certs", flush=True)
+except Exception as e:
+    print(f"WARNING: SSL patch failed: {e}", flush=True)
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "77f8b36-v2"
+_COMMIT = "0607ba0-v2"
 
 
 def _ntfy(msg):
@@ -75,9 +99,9 @@ for key in sorted(os.environ):
 print("=== End RunPod env ===", flush=True)
 
 # --- MONKEY-PATCH: Replace aiohttp POST with requests POST for result delivery ---
-# Even with SSL_CERT_FILE set, aiohttp may still have issues on this base image.
-# Replace _transmit() with a requests-based version as a safety net.
+# Even with the SSL patch, keep this as a safety net for result delivery.
 # Use asyncio.to_thread to avoid blocking the event loop.
+_job_done_url = "UNKNOWN"
 try:
     import asyncio
     import requests as req_lib
