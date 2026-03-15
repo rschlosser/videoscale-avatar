@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 import time
+import urllib.request
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout, force=True)
 logger = logging.getLogger(__name__)
@@ -19,41 +20,63 @@ t_module_start = time.time()
 print(f"Python: {sys.version}", flush=True)
 print(f"CWD: {os.getcwd()}", flush=True)
 
+# --- External diagnostic logging via ntfy.sh (stdlib only) ---
+NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
+
+
+def _ntfy(msg):
+    """Fire-and-forget POST to ntfy.sh for external diagnostics. Uses only stdlib."""
+    try:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=str(msg)[:4000].encode("utf-8"),
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+
 # --- FIX SSL FOR AIOHTTP ---
-# The base image (conda OpenSSL) has stale CA certs. We've copied certifi's bundle
-# to /etc/ssl/certs/ca-certificates.crt and set SSL_CERT_FILE, but aiohttp's SSL
-# context may not pick it up. Patch ssl.create_default_context to always load our certs.
+# The base image (conda OpenSSL) has stale CA certs. Patch ssl.create_default_context
+# to always load our cert bundle so aiohttp's SSL context works.
 import ssl
+
 _orig_create_default_context = ssl.create_default_context
 
-def _patched_create_default_context(purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None):
-    ctx = _orig_create_default_context(purpose, cafile=cafile, capath=capath, cadata=cadata)
-    cert_file = os.environ.get("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+
+def _patched_create_default_context(
+    purpose=ssl.Purpose.SERVER_AUTH, *, cafile=None, capath=None, cadata=None
+):
+    ctx = _orig_create_default_context(
+        purpose, cafile=cafile, capath=capath, cadata=cadata
+    )
+    cert_file = os.environ.get(
+        "SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt"
+    )
     try:
         ctx.load_verify_locations(cert_file)
     except Exception:
         pass
     return ctx
 
+
 ssl.create_default_context = _patched_create_default_context
-print(f"Patched ssl.create_default_context to load {os.environ.get('SSL_CERT_FILE', '/etc/ssl/certs/ca-certificates.crt')}", flush=True)
+print(
+    f"Patched ssl.create_default_context to load "
+    f"{os.environ.get('SSL_CERT_FILE', '/etc/ssl/certs/ca-certificates.crt')}",
+    flush=True,
+)
 
 import runpod
 
-print(f"runpod {getattr(runpod, '__version__', '?')} imported ({time.time() - t_module_start:.1f}s)", flush=True)
+print(
+    f"runpod {getattr(runpod, '__version__', '?')} imported "
+    f"({time.time() - t_module_start:.1f}s)",
+    flush=True,
+)
 
-# --- External diagnostic logging via ntfy.sh ---
-NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-
-def _ntfy(msg):
-    """Fire-and-forget POST to ntfy.sh for external diagnostics."""
-    try:
-        import requests as _r
-        _r.post(f"https://ntfy.sh/{NTFY_TOPIC}", data=str(msg)[:4000], timeout=5)
-    except Exception:
-        pass
-
-# --- Print all RunPod env vars for debugging ---
+# --- Print RunPod env vars + send to ntfy ---
 env_lines = []
 print("=== RunPod environment ===", flush=True)
 for key in sorted(os.environ):
@@ -65,74 +88,19 @@ for key in sorted(os.environ):
         print(f"  {key}={val}", flush=True)
 print("=== End RunPod env ===", flush=True)
 
-# --- MONKEY-PATCH: Replace aiohttp POST with requests POST for result delivery ---
-# Keep this as a safety net in case the SSL fix alone isn't enough.
+# Check JOB_DONE_URL
 try:
-    import asyncio
-    import requests as req_lib
     import runpod.serverless.modules.rp_http as rp_http
 
-    _original_transmit = rp_http._transmit
-    _job_done_url = getattr(rp_http, 'JOB_DONE_URL', 'NOT SET')
-    print(f"Original _transmit: {_original_transmit}", flush=True)
+    _job_done_url = getattr(rp_http, "JOB_DONE_URL", "NOT SET")
     print(f"JOB_DONE_URL: {_job_done_url}", flush=True)
-
-    _ntfy(f"STARTUP: runpod={getattr(runpod, '__version__', '?')}, JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines))
-
-    def _sync_post(url, job_data, auth_header):
-        """Synchronous POST via requests — runs in a thread to avoid blocking event loop."""
-        headers = {
-            "charset": "utf-8",
-            "Content-Type": "application/x-www-form-urlencoded",
-        }
-        if auth_header:
-            headers["Authorization"] = auth_header
-
-        t0 = time.time()
-        resp = req_lib.post(url, data=job_data, headers=headers, timeout=30)
-        elapsed = time.time() - t0
-        print(f"  [_sync_post] -> {resp.status_code} ({elapsed:.1f}s) body={resp.text[:200]}", flush=True)
-        resp.raise_for_status()
-        return resp.status_code
-
-    async def _requests_transmit(client_session, url, job_data):
-        """Replace aiohttp POST with requests.post in a thread pool."""
-        print(f"  [_requests_transmit CALLED] url={url}", flush=True)
-        print(f"  [_requests_transmit] data_len={len(job_data) if job_data else 0}", flush=True)
-
-        # Extract auth from aiohttp session
-        auth_header = None
-        try:
-            if client_session and hasattr(client_session, '_default_headers') and client_session._default_headers:
-                auth_header = client_session._default_headers.get("Authorization")
-                if auth_header:
-                    print(f"  [_requests_transmit] auth from session: {str(auth_header)[:15]}...", flush=True)
-        except Exception as e:
-            print(f"  [_requests_transmit] auth extraction error: {e}", flush=True)
-
-        if not auth_header and os.environ.get("RUNPOD_AI_API_KEY"):
-            auth_header = os.environ["RUNPOD_AI_API_KEY"]
-            print(f"  [_requests_transmit] auth from env", flush=True)
-
-        if not auth_header:
-            print(f"  [_requests_transmit] WARNING: no auth found!", flush=True)
-
-        try:
-            # Run blocking POST in thread to avoid blocking the event loop
-            status = await asyncio.to_thread(_sync_post, url, job_data, auth_header)
-            _ntfy(f"TRANSMIT OK: url={url}, status={status}")
-            print(f"  [_requests_transmit] SUCCESS", flush=True)
-        except Exception as e:
-            _ntfy(f"TRANSMIT FAIL: url={url}, err={type(e).__name__}: {e}")
-            print(f"  [_requests_transmit] FAILED: {type(e).__name__}: {e}", flush=True)
-
-    rp_http._transmit = _requests_transmit
-    print(f"Patched _transmit: {rp_http._transmit}", flush=True)
-    print(f"Patch verified: {rp_http._transmit is _requests_transmit}", flush=True)
+    _ntfy(
+        f"STARTUP: runpod={getattr(runpod, '__version__', '?')}, "
+        f"JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines)
+    )
 except Exception as e:
-    import traceback as _tb
-    print(f"WARNING: Failed to patch _transmit: {e}", flush=True)
-    _tb.print_exc()
+    print(f"WARNING: Could not read JOB_DONE_URL: {e}", flush=True)
+    _ntfy(f"STARTUP: error reading JOB_DONE_URL: {e}")
 
 # Lazy model loading
 engine = None
@@ -147,6 +115,7 @@ def _ensure_models():
         raise RuntimeError(f"Model loading failed previously: {load_error}")
     try:
         from app.engine import AvatarEngine
+
         logger.info("Loading models...")
         t0 = time.time()
         engine = AvatarEngine()
@@ -154,32 +123,30 @@ def _ensure_models():
         logger.info("Models loaded in %.1fs", time.time() - t0)
     except Exception as e:
         import traceback as tb
+
         load_error = f"{e}\n{tb.format_exc()}"
         logger.error("Model loading failed: %s", e, exc_info=True)
         raise
 
 
-def handler(job):
-    """RunPod serverless handler."""
+def _real_handler(job):
+    """RunPod serverless handler — actual logic."""
     input_data = job["input"]
-    job_id = job.get("id", "unknown")
-    logger.info("Job received: id=%s keys=%s", job_id, list(input_data.keys()))
-    _ntfy(f"JOB START: id={job_id}, keys={list(input_data.keys())}")
 
     # Ping: instant return + diagnostics
     if input_data.get("ping"):
         import runpod.serverless.modules.rp_http as _rp_http
+
         diag = {
             "pong": True,
             "models_loaded": engine.models_loaded if engine else False,
             "uptime": round(time.time() - t_module_start, 1),
-            "runpod_version": getattr(runpod, '__version__', '?'),
-            "transmit_patched": "requests_transmit" in str(_rp_http._transmit),
-            "job_done_url": getattr(_rp_http, 'JOB_DONE_URL', 'NOT SET'),
-            "webhook_post_output": os.environ.get('RUNPOD_WEBHOOK_POST_OUTPUT', 'NOT SET'),
+            "runpod_version": getattr(runpod, "__version__", "?"),
+            "job_done_url": getattr(_rp_http, "JOB_DONE_URL", "NOT SET"),
+            "webhook_post_output": os.environ.get(
+                "RUNPOD_WEBHOOK_POST_OUTPUT", "NOT SET"
+            ),
         }
-        _ntfy(f"PING RETURN: {diag}")
-        print(f"  [PING] diag={diag}", flush=True)
         return diag
 
     # Debug: test model loading
@@ -187,19 +154,19 @@ def handler(job):
         import base64
         import tempfile
         from pathlib import Path
+
         results = {"uptime": round(time.time() - t_module_start, 1)}
         try:
             _ensure_models()
             results["models_loaded"] = True
             results["load_error"] = None
-        except Exception as e:
+        except Exception:
             results["models_loaded"] = False
             results["load_error"] = str(load_error)
-            _ntfy(f"DEBUG RETURN (load fail): {results}")
             return results
 
-        # If image provided, test face detection
         import cv2
+
         pipeline = engine.lp_pipeline
         results["model_keys"] = list(pipeline.model_dict.keys())
 
@@ -209,7 +176,9 @@ def handler(job):
                 img_path = os.path.join(td, "test.jpg")
                 Path(img_path).write_bytes(base64.b64decode(image_b64))
                 img_bgr = cv2.imread(img_path)
-                results["image_shape"] = list(img_bgr.shape) if img_bgr is not None else None
+                results["image_shape"] = (
+                    list(img_bgr.shape) if img_bgr is not None else None
+                )
 
                 t0 = time.time()
                 faces = pipeline.model_dict["face_analysis"].predict(img_bgr)
@@ -218,7 +187,6 @@ def handler(job):
                     "time": round(time.time() - t0, 2),
                 }
 
-                # Full prepare_source test
                 try:
                     t0 = time.time()
                     ret = pipeline.prepare_source(img_path, realtime=False)
@@ -230,9 +198,9 @@ def handler(job):
                     }
                 except Exception as e:
                     import traceback as tb
+
                     results["prepare_source_error"] = f"{e}\n{tb.format_exc()}"
 
-        _ntfy(f"DEBUG RETURN: {results}")
         return results
 
     # Normal: generate video
@@ -264,12 +232,19 @@ def handler(job):
         img_path.write_bytes(base64.b64decode(image_b64))
         audio_path.write_bytes(base64.b64decode(audio_b64))
 
-        logger.info("Generating: image=%d bytes, audio=%d bytes, res=%s",
-                     img_path.stat().st_size, audio_path.stat().st_size, resolution)
+        logger.info(
+            "Generating: image=%d bytes, audio=%d bytes, res=%s",
+            img_path.stat().st_size,
+            audio_path.stat().st_size,
+            resolution,
+        )
         try:
             engine._generate_sync(
-                image_path=str(img_path), audio_path=str(audio_path),
-                output_path=str(output_path), resolution=resolution)
+                image_path=str(img_path),
+                audio_path=str(audio_path),
+                output_path=str(output_path),
+                resolution=resolution,
+            )
         except Exception as e:
             logger.error("Generation failed: %s", e, exc_info=True)
             return {"error": str(e)}
@@ -286,11 +261,32 @@ def handler(job):
     }
 
 
-print(f"Registering handler ({time.time() - t_module_start:.1f}s since module load)...", flush=True)
+def handler(job):
+    """Wrapper handler with ntfy diagnostics."""
+    job_id = job.get("id", "unknown")
+    _ntfy(f"HANDLER CALLED: id={job_id}, keys={list(job.get('input', {}).keys())}")
+    try:
+        t0 = time.time()
+        result = _real_handler(job)
+        elapsed = round(time.time() - t0, 2)
+        # Truncate result for ntfy (avoid sending huge base64)
+        result_summary = {k: type(v).__name__ for k, v in result.items()} if isinstance(result, dict) else str(type(result))
+        _ntfy(f"HANDLER OK: id={job_id}, elapsed={elapsed}s, result_keys={result_summary}")
+        return result
+    except Exception as e:
+        _ntfy(f"HANDLER ERROR: id={job_id}, err={type(e).__name__}: {e}")
+        raise
+
+
+print(
+    f"Registering handler ({time.time() - t_module_start:.1f}s since module load)...",
+    flush=True,
+)
 try:
     runpod.serverless.start({"handler": handler})
 except Exception as e:
     print(f"CRITICAL: runpod.serverless.start() CRASHED: {e}", flush=True)
     import traceback
+
     traceback.print_exc()
     sys.exit(1)
