@@ -99,9 +99,32 @@ if _ssl_ctx is not None:
         except Exception:
             pass
 
+        _ssl_patched = True
         print("SSL: patched AsyncClientSession with certifi SSL context", flush=True)
     except Exception as e:
+        _ssl_patched = False
         print(f"WARNING: AsyncClientSession patch failed: {e}", flush=True)
+else:
+    _ssl_patched = False
+
+# --- Test aiohttp HTTPS connectivity ---
+_aiohttp_test = "SKIPPED"
+if _ssl_ctx is not None:
+    try:
+        import asyncio as _asyncio
+        import aiohttp as _aiohttp
+
+        async def _test_ssl():
+            conn = _aiohttp.TCPConnector(ssl=_ssl_ctx)
+            async with _aiohttp.ClientSession(connector=conn) as s:
+                async with s.get("https://api.runpod.ai/health", timeout=_aiohttp.ClientTimeout(total=10)) as r:
+                    return r.status
+
+        _aiohttp_test = _asyncio.get_event_loop().run_until_complete(_test_ssl())
+        print(f"SSL: aiohttp test → {_aiohttp_test}", flush=True)
+    except Exception as e:
+        _aiohttp_test = f"FAILED: {type(e).__name__}: {e}"
+        print(f"SSL: aiohttp test FAILED: {e}", flush=True)
 
 # --- Print RunPod env vars ---
 env_lines = []
@@ -207,8 +230,9 @@ except Exception as e:
     _tb.print_exc()
 
 _ntfy(
-    f"STARTUP [{_COMMIT}]: runpod={getattr(runpod, '__version__', '?')}, "
-    f"JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines[:10])
+    f"STARTUP [{_COMMIT}]: runpod={getattr(runpod, '__version__', '?')}\n"
+    f"ssl_patched={_ssl_patched}, aiohttp_test={_aiohttp_test}\n"
+    f"JOB_DONE_URL={_job_done_url}\n" + "\n".join(env_lines[:8])
 )
 
 # Lazy model loading
