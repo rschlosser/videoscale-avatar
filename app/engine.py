@@ -127,11 +127,19 @@ class AvatarEngine:
         resolution: str,
     ) -> str:
         """Synchronous generation — runs in a thread."""
+        # Detect source image orientation to preserve aspect ratio
+        src_img = cv2.imread(image_path)
+        if src_img is None:
+            raise RuntimeError(f"Cannot read image: {image_path}")
+        src_h, src_w = src_img.shape[:2]
+        is_portrait = src_h > src_w
+
         res_map = {
-            "480p": (480, 854),
-            "720p": (720, 1280),
+            "480p": {"landscape": (480, 854), "portrait": (854, 480)},
+            "720p": {"landscape": (720, 1280), "portrait": (1280, 720)},
         }
-        target_h, target_w = res_map.get(resolution, (480, 854))
+        orientation = "portrait" if is_portrait else "landscape"
+        target_h, target_w = res_map.get(resolution, res_map["480p"])[orientation]
 
         logger.info(
             "Generating: image=%s, audio=%s, resolution=%s (%dx%d)",
