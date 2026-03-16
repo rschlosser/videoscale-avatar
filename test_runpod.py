@@ -17,7 +17,7 @@ import time
 import urllib.request
 import urllib.error
 
-ENDPOINT_ID = "fpk0j489fszqai"
+ENDPOINT_ID = "847c092zb8f47c"
 MEDIA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "media")
 DEFAULT_IMAGE = os.path.join(MEDIA_DIR, "ai_4ab86e0c.png")
 DEFAULT_AUDIO = os.path.join(MEDIA_DIR, "ElevenLabs_2026-03-11T16_20_57_Bella - Professional, Bright, Warm_pre_sp100_s40_sb70_se55_b_m2.mp3")

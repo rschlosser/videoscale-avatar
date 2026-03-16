@@ -55,6 +55,12 @@ class AvatarEngine:
         self.infer_cfg = OmegaConf.load(str(CONFIG_PATH))
         self.infer_cfg.infer_params.flag_pasteback = True
 
+        # Fix mask_crop_path — config uses relative "./assets/mask_template.png"
+        # which resolves to /app/assets/ but the file lives under FasterLivePortrait/
+        self.infer_cfg.infer_params.mask_crop_path = str(
+            FLPROOT / "assets" / "mask_template.png"
+        )
+
         # Override checkpoint paths to use our download location
         joyvasa_cfg = self.infer_cfg.joyvasa_models
         joyvasa_cfg.motion_model_path = str(
