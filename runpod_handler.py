@@ -47,7 +47,7 @@ except Exception as e:
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "boot-diag-v7"
+_COMMIT = "getjob-diag-v8"
 
 
 def _ntfy(msg):
@@ -236,6 +236,47 @@ except Exception as e:
 
     print(f"WARNING: Failed to patch _transmit: {e}", flush=True)
     _tb.print_exc()
+
+# --- Patch get_job to diagnose job polling ---
+_get_job_call_count = 0
+try:
+    import runpod.serverless.modules.rp_job as _rp_job
+
+    _original_get_job = _rp_job.get_job
+
+    async def _patched_get_job(session, num_jobs=1):
+        global _get_job_call_count
+        _get_job_call_count += 1
+        try:
+            result = await _original_get_job(session, num_jobs)
+            if _get_job_call_count <= 3 or _get_job_call_count % 20 == 0:
+                _ntfy(
+                    f"GET_JOB [{_COMMIT}] #{_get_job_call_count}: "
+                    f"result={str(result)[:200]}"
+                )
+            return result
+        except Exception as e:
+            _ntfy(
+                f"GET_JOB ERROR [{_COMMIT}] #{_get_job_call_count}: "
+                f"{type(e).__name__}: {e}"
+            )
+            raise
+
+    _rp_job.get_job = _patched_get_job
+
+    # Also patch it in rp_scale if it imported get_job directly
+    import runpod.serverless.modules.rp_scale as _rp_scale
+    if hasattr(_rp_scale, 'get_job'):
+        _rp_scale.get_job = _patched_get_job
+    # Check if jobs_fetcher references it differently
+    print(f"Patched get_job OK. rp_job._job_get_url exists={hasattr(_rp_job, '_job_get_url')}", flush=True)
+    if hasattr(_rp_job, '_job_get_url'):
+        try:
+            print(f"  _job_get_url(1) = {_rp_job._job_get_url(1)}", flush=True)
+        except Exception as e:
+            print(f"  _job_get_url error: {e}", flush=True)
+except Exception as e:
+    print(f"WARNING: get_job patch failed: {e}", flush=True)
 
 _ntfy(
     f"STARTUP [{_COMMIT}]: runpod={getattr(runpod, '__version__', '?')}\n"
