@@ -74,4 +74,4 @@ COPY app/ app/
 COPY runpod_handler.py .
 
 # Fix NVIDIA stubs at container start, then launch handler
-CMD ["/bin/bash", "-c", "curl -s -d \"BOOT: $(hostname) $(date -u +%H:%M:%S) python=$(python --version 2>&1)\" https://ntfy.sh/videoscale-avatar-debug-9f3k2x || true; /app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
+CMD ["/bin/bash", "-c", "/app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
