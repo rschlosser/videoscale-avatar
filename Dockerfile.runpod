@@ -10,10 +10,6 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
-# Update only CA certificates — pin conda itself to avoid unintended upgrades
-RUN conda install -y -n base --no-update-deps ca-certificates 2>/dev/null || \
-    conda install -y -n base -c conda-forge --no-update-deps ca-certificates || true
-
 # Fix NVIDIA stub libraries that shadow real driver libs at runtime.
 # The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
 # CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into
