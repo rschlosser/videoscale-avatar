@@ -26,7 +26,8 @@ WORKDIR /app/FasterLivePortrait
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Downgrade transformers to avoid weights_only enforcement requiring torch>=2.6
-RUN pip install --no-cache-dir transformers==4.37.0
+# Install brotli so aiohttp can decode br-encoded responses from RunPod API
+RUN pip install --no-cache-dir transformers==4.37.0 brotli
 
 WORKDIR /app
 COPY requirements.txt .

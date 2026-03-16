@@ -47,7 +47,7 @@ except Exception as e:
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "clean-cmd-v10"
+_COMMIT = "no-brotli-v11"
 
 
 def _ntfy(msg):
@@ -81,9 +81,14 @@ if _ssl_ctx is not None:
         from aiohttp import TCPConnector as _TCPConnector
 
         def _PatchedAsyncClientSession(*args, **kwargs):
+            # Merge auth headers with Accept-Encoding that excludes Brotli.
+            # The base image may lack the brotli Python package, causing
+            # ClientPayloadError when the server returns br-encoded responses.
+            _headers = {**(_http_client.get_auth_header() or {}),
+                        "Accept-Encoding": "gzip, deflate"}
             return _ClientSession(
                 connector=_TCPConnector(limit=0, ssl=_ssl_ctx),
-                headers=_http_client.get_auth_header(),
+                headers=_headers,
                 timeout=_ClientTimeout(600, ceil_threshold=400),
                 *args,
                 **kwargs,
