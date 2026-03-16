@@ -40,9 +40,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY download_models.py .
 RUN python download_models.py
 
-# Symlink checkpoints and assets so FasterLivePortrait finds them
+# Symlink checkpoints so FasterLivePortrait finds them
 RUN ln -sf /app/checkpoints /app/FasterLivePortrait/checkpoints
-RUN ln -sf /app/FasterLivePortrait/assets /app/assets
 
 # Patch JoyVASA: weights_only=False for torch.load compatibility
 RUN sed -i 's/torch.load(motion_model_path, map_location="cpu")/torch.load(motion_model_path, map_location="cpu", weights_only=False)/' \
