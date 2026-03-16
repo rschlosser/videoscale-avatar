@@ -47,7 +47,7 @@ except Exception as e:
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "ffmpeg-v13"
+_COMMIT = "face-diag-v14"
 
 
 def _ntfy(msg):
@@ -408,11 +408,14 @@ def _real_handler(job):
     t0 = time.time()
     with tempfile.TemporaryDirectory(prefix="avatar_") as tmpdir:
         tmpdir = Path(tmpdir)
-        img_path = tmpdir / "input.jpg"
+        # Detect image format from base64 header
+        img_bytes = base64.b64decode(image_b64)
+        img_ext = ".png" if img_bytes[:4] == b'\x89PNG' else ".jpg"
+        img_path = tmpdir / f"input{img_ext}"
         audio_path = tmpdir / "input.mp3"
         output_path = tmpdir / "output.mp4"
 
-        img_path.write_bytes(base64.b64decode(image_b64))
+        img_path.write_bytes(img_bytes)
         audio_raw = tmpdir / "input_raw.mp3"
         audio_raw.write_bytes(base64.b64decode(audio_b64))
 

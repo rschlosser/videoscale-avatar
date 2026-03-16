@@ -144,7 +144,11 @@ class AvatarEngine:
         # Step 2: Prepare source image
         logger.info("Step 2/3: Preparing source image...")
         _t2 = _time.time()
-        ret = self.lp_pipeline.prepare_source(image_path, realtime=False)
+        try:
+            ret = self.lp_pipeline.prepare_source(image_path, realtime=False)
+        except Exception as _e:
+            logger.error("prepare_source exception: %s", _e, exc_info=True)
+            raise RuntimeError(f"Face detection crashed: {_e}")
         logger.info(
             "prepare_source returned=%s in %.1fs, src_imgs=%d, src_infos=%d",
             ret, _time.time() - _t2,
@@ -152,7 +156,11 @@ class AvatarEngine:
             len(getattr(self.lp_pipeline, 'src_infos', [])),
         )
         if not ret:
-            raise RuntimeError(f"Failed to detect face in source image: {image_path}")
+            # Log image details for debugging
+            import cv2 as _cv2
+            _img = _cv2.imread(image_path)
+            _img_info = f"shape={_img.shape}, dtype={_img.dtype}" if _img is not None else "imread returned None"
+            raise RuntimeError(f"Failed to detect face in source image: {image_path} ({_img_info})")
 
         # Step 3: Render each frame
         logger.info("Step 3/3: Rendering %d frames...", n_frames)
