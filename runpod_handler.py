@@ -413,12 +413,25 @@ def _real_handler(job):
         output_path = tmpdir / "output.mp4"
 
         img_path.write_bytes(base64.b64decode(image_b64))
-        audio_path.write_bytes(base64.b64decode(audio_b64))
+        audio_raw = tmpdir / "input_raw.mp3"
+        audio_raw.write_bytes(base64.b64decode(audio_b64))
+
+        # Convert to 16kHz WAV — JoyVASA/HuBERT expects WAV input
+        audio_path = tmpdir / "input.wav"
+        import subprocess
+        ffmpeg_result = subprocess.run(
+            ["ffmpeg", "-y", "-i", str(audio_raw), "-ar", "16000", "-ac", "1", str(audio_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if ffmpeg_result.returncode != 0:
+            logger.error("ffmpeg conversion failed: %s", ffmpeg_result.stderr)
+            return {"error": f"Audio conversion failed: {ffmpeg_result.stderr[:500]}"}
 
         logger.info(
-            "Generating: image=%d bytes, audio=%d bytes, res=%s",
+            "Generating: image=%d bytes, audio=%d bytes (converted from %d), res=%s",
             img_path.stat().st_size,
             audio_path.stat().st_size,
+            audio_raw.stat().st_size,
             resolution,
         )
         try:
