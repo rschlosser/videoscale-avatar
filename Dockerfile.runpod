@@ -10,9 +10,9 @@ ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
-# Update conda CA certificates — base image has stale certs that break aiohttp SSL
-RUN conda update -y -n base ca-certificates 2>/dev/null || \
-    conda install -y -n base -c conda-forge ca-certificates || true
+# Update only CA certificates — pin conda itself to avoid unintended upgrades
+RUN conda install -y -n base --no-update-deps ca-certificates 2>/dev/null || \
+    conda install -y -n base -c conda-forge --no-update-deps ca-certificates || true
 
 # Fix NVIDIA stub libraries that shadow real driver libs at runtime.
 # The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
@@ -78,4 +78,4 @@ COPY app/ app/
 COPY runpod_handler.py .
 
 # Fix NVIDIA stubs at container start, then launch handler
-CMD ["/bin/bash", "-c", "/app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
+CMD ["/bin/bash", "-c", "curl -s -d \"BOOT: $(hostname) $(date -u +%H:%M:%S) python=$(python --version 2>&1)\" https://ntfy.sh/videoscale-avatar-debug-9f3k2x || true; /app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
