@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--image", default=DEFAULT_IMAGE, help="Path to portrait image")
     parser.add_argument("--audio", default=DEFAULT_AUDIO, help="Path to audio file")
     parser.add_argument("--resolution", default="480p", choices=["480p", "720p"])
+    parser.add_argument("--prompt", default="A person talking", help="Text prompt for T5 conditioning")
     parser.add_argument("--output", default="output.mp4", help="Output video path")
     parser.add_argument("--endpoint", default=ENDPOINT_ID, help="RunPod endpoint ID")
     parser.add_argument("--timeout", type=int, default=MAX_POLL_TIME, help="Max seconds to wait for job")
@@ -85,6 +86,7 @@ def main():
                 "image_base64": image_b64,
                 "audio_base64": audio_b64,
                 "resolution": args.resolution,
+                "prompt": args.prompt,
             }
         }).encode("utf-8")
 

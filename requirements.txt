@@ -1,24 +1,14 @@
-# Core
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-python-multipart>=0.0.6
-
 # RunPod serverless SDK
 runpod>=1.6.0
 
 # SSL certificates for aiohttp (RunPod SDK uses aiohttp for webhook delivery)
 certifi
 
-# Config (needed to load FasterLivePortrait configs)
-omegaconf>=2.3.0
+# Brotli for RunPod API response decoding
+brotli
+
+# HTTP requests (used in handler monkey-patches)
+requests
 
 # HuggingFace (model downloads)
 huggingface-hub>=0.19.0
-
-# Audio processing
-librosa>=0.10.0
-soundfile>=0.12.0
-
-# Image processing (opencv comes from FasterLivePortrait deps)
-Pillow>=10.0.0
-numpy>=1.24.0

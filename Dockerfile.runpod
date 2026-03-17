@@ -1,81 +1,84 @@
-# RunPod Serverless variant — uses handler entry point instead of HTTP server
-# Build on a GPU machine:
-#   docker build --platform linux/amd64 -f Dockerfile.runpod -t videoscale-avatar:runpod .
+# RunPod Serverless variant — Hallo3 (CogVideoX-5B DiT) avatar generation
+# Built via GitHub Actions (never locally on ARM Mac!)
+#
+# Base: CUDA 12.1 + Ubuntu 22.04
+# Models: Downloaded at first startup to RunPod network volume (~52GB)
+# GPU: H100 80GB (required for Hallo3 inference)
+#
+# NOTE: Models are NOT baked into the image to keep it small (~15GB).
+# Attach a RunPod network volume and models download on first boot.
 
-FROM shaoguo/faster_liveportrait:v3
+FROM nvidia/cuda:12.1.1-devel-ubuntu22.04
 
 USER root
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV PATH="/root/miniconda3/bin:${PATH}"
 SHELL ["/bin/bash", "-c"]
 
-# Install ffmpeg (needed for MP3 decoding via librosa + final video encoding)
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 python3.10-dev python3.10-venv python3-pip \
+    ffmpeg git wget curl \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender1 \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/python3.10 /usr/bin/python3 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Fix NVIDIA stub libraries that shadow real driver libs at runtime.
-# The base image ships empty stubs in /lib/x86_64-linux-gnu/ from the build-time
-# CUDA toolkit. At runtime, RunPod bind-mounts the real driver (e.g. .550.x) into
-# the same directory but the empty .so.1 / .515.x stubs take precedence.
-# This entrypoint script fixes the symlinks before starting the app.
-COPY fix_nvidia_stubs.sh /app/fix_nvidia_stubs.sh
-RUN chmod +x /app/fix_nvidia_stubs.sh
+# Upgrade pip
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# FasterLivePortrait repo (source code + configs)
-RUN git clone --depth 1 https://github.com/warmshao/FasterLivePortrait.git /app/FasterLivePortrait
-
-# Install FasterLivePortrait deps + our deps
-WORKDIR /app/FasterLivePortrait
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Downgrade transformers to avoid weights_only enforcement requiring torch>=2.6
-# Install brotli so aiohttp can decode br-encoded responses from RunPod API
-RUN pip install --no-cache-dir transformers==4.37.0 brotli
+# PyTorch 2.4.0 + CUDA 12.1
+RUN pip install --no-cache-dir \
+    torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 \
+    --index-url https://download.pytorch.org/whl/cu121
 
 WORKDIR /app
+
+# Clone Hallo3 repo
+RUN git clone --depth 1 https://github.com/fudan-generative-vision/hallo3.git /app/hallo3
+
+# Install Hallo3 dependencies
+RUN pip install --no-cache-dir \
+    SwissArmyTransformer==0.4.12 \
+    deepspeed==0.14.4 \
+    transformers==4.45.2 \
+    omegaconf==2.3.0 \
+    insightface==0.7.3 \
+    mediapipe==0.10.14 \
+    audio-separator==0.21.2 \
+    librosa \
+    moviepy==1.0.3 \
+    imageio \
+    imageio-ffmpeg \
+    decord \
+    einops \
+    onnxruntime-gpu \
+    opencv-python-headless \
+    Pillow \
+    numpy \
+    scipy \
+    tqdm \
+    accelerate
+
+# RunPod SDK + handler dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Download model checkpoints into the location FasterLivePortrait expects
+# Hallo3 needs these env vars for single-GPU inference (SwissArmyTransformer/DeepSpeed)
+ENV WORLD_SIZE=1
+ENV RANK=0
+ENV LOCAL_RANK=0
+ENV MASTER_ADDR=localhost
+ENV MASTER_PORT=29500
+
+# Add hallo3 to Python path
+ENV PYTHONPATH="/app/hallo3:${PYTHONPATH}"
+
+# Copy application code
 COPY download_models.py .
-RUN python download_models.py
-
-# Symlink checkpoints so FasterLivePortrait finds them
-RUN ln -sf /app/checkpoints /app/FasterLivePortrait/checkpoints
-
-# Patch JoyVASA: weights_only=False for torch.load compatibility
-RUN sed -i 's/torch.load(motion_model_path, map_location="cpu")/torch.load(motion_model_path, map_location="cpu", weights_only=False)/' \
-    /app/FasterLivePortrait/src/pipelines/joyvasa_audio_to_motion_pipeline.py
-
-# Patch HuBERT: use eager attention to avoid sdpa output_attentions error
-RUN sed -i 's/HubertModel.from_pretrained(audio_encoder_path)/HubertModel.from_pretrained(audio_encoder_path, attn_implementation="eager")/' \
-    /app/FasterLivePortrait/src/models/JoyVASA/dit_talking_head.py
-
-# Patch predictor.py: catch ImportError (not just ModuleNotFoundError) for TensorRT
-# The base image has tensorrt Python package but may lack libnvinfer.so.8 at runtime
-RUN sed -i 's/except ModuleNotFoundError:/except (ModuleNotFoundError, ImportError):/' \
-    /app/FasterLivePortrait/src/models/predictor.py
-
-# Fix SSL certificates — base image's conda OpenSSL has stale CA certs.
-# 1. Copy certifi bundle to system + conda OpenSSL cert paths
-# 2. Set SSL_CERT_FILE env var so OpenSSL always finds certs regardless of compile-time paths
-RUN CERTIFI_CA=$(python -c "import certifi; print(certifi.where())") && \
-    cp "$CERTIFI_CA" /etc/ssl/certs/ca-certificates.crt && \
-    OPENSSL_CAFILE=$(python -c "import ssl; print(ssl.get_default_verify_paths().openssl_cafile)") && \
-    mkdir -p "$(dirname "$OPENSSL_CAFILE")" && cp "$CERTIFI_CA" "$OPENSSL_CAFILE" && \
-    echo "CA certs: $CERTIFI_CA -> /etc/ssl/certs/ca-certificates.crt + $OPENSSL_CAFILE" && \
-    python -c "import ssl; print('OpenSSL:', ssl.OPENSSL_VERSION); print('Verify paths:', ssl.get_default_verify_paths())"
-
-# Force OpenSSL to use our cert bundle for ALL Python SSL connections (requests, aiohttp, urllib)
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-ENV CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-
-# Add FasterLivePortrait to Python path
-ENV PYTHONPATH="/app/FasterLivePortrait:${PYTHONPATH}"
-
 COPY app/ app/
 COPY runpod_handler.py .
+COPY start.sh .
+RUN chmod +x start.sh
 
-# Fix NVIDIA stubs at container start, then launch handler
-CMD ["/bin/bash", "-c", "/app/fix_nvidia_stubs.sh && python -u runpod_handler.py"]
+CMD ["/bin/bash", "start.sh"]

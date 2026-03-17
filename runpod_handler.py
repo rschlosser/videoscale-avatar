@@ -47,7 +47,7 @@ except Exception as e:
 
 # --- External diagnostic logging via ntfy.sh ---
 NTFY_TOPIC = "videoscale-avatar-debug-9f3k2x"
-_COMMIT = "portrait-v17"
+_COMMIT = "hallo3-v1"
 
 
 def _ntfy(msg):
@@ -332,10 +332,6 @@ def _real_handler(job):
 
     # Debug
     if input_data.get("debug"):
-        import base64
-        import tempfile
-        from pathlib import Path
-
         results = {"uptime": round(time.time() - t_module_start, 1)}
         try:
             _ensure_models()
@@ -344,46 +340,6 @@ def _real_handler(job):
         except Exception:
             results["models_loaded"] = False
             results["load_error"] = str(load_error)
-            return results
-
-        import cv2
-
-        pipeline = engine.lp_pipeline
-        results["model_keys"] = list(pipeline.model_dict.keys())
-
-        image_b64 = input_data.get("image_base64")
-        if image_b64:
-            with tempfile.TemporaryDirectory() as td:
-                img_path = os.path.join(td, "test.jpg")
-                Path(img_path).write_bytes(base64.b64decode(image_b64))
-                img_bgr = cv2.imread(img_path)
-                results["image_shape"] = (
-                    list(img_bgr.shape) if img_bgr is not None else None
-                )
-
-                t0 = time.time()
-                faces = pipeline.model_dict["face_analysis"].predict(img_bgr)
-                results["face_detection"] = {
-                    "faces": len(faces),
-                    "time": round(time.time() - t0, 2),
-                }
-
-                try:
-                    t0 = time.time()
-                    ret = pipeline.prepare_source(img_path, realtime=False)
-                    results["prepare_source"] = {
-                        "returned": ret,
-                        "time": round(time.time() - t0, 2),
-                        "src_imgs": len(pipeline.src_imgs),
-                        "src_infos": len(pipeline.src_infos),
-                    }
-                except Exception as e:
-                    import traceback as tb
-
-                    results["prepare_source_error"] = (
-                        f"{e}\n{tb.format_exc()}"
-                    )
-
         return results
 
     # Normal: generate video
@@ -399,6 +355,7 @@ def _real_handler(job):
     image_b64 = input_data.get("image_base64")
     audio_b64 = input_data.get("audio_base64")
     resolution = input_data.get("resolution", "480p")
+    prompt = input_data.get("prompt", "A person talking")
 
     if not image_b64 or not audio_b64:
         return {"error": "image_base64 and audio_base64 are required"}
@@ -419,7 +376,7 @@ def _real_handler(job):
         audio_raw = tmpdir / "input_raw.mp3"
         audio_raw.write_bytes(base64.b64decode(audio_b64))
 
-        # Convert to 16kHz WAV — JoyVASA/HuBERT expects WAV input
+        # Convert to 16kHz WAV — Hallo3/wav2vec2 expects WAV input
         audio_path = tmpdir / "input.wav"
         import subprocess
         ffmpeg_result = subprocess.run(
@@ -442,6 +399,7 @@ def _real_handler(job):
                 image_path=str(img_path),
                 audio_path=str(audio_path),
                 output_path=str(output_path),
+                prompt=prompt,
                 resolution=resolution,
             )
         except Exception as e:
