@@ -11,3 +11,4 @@ checkpoints/
 *.onnx
 .env
 .DS_Store
+output*.mp4
